@@ -297,6 +297,9 @@ switch ($page) {
     case 'trx_approve':
         handleTrxApprove(); break;
 
+    case 'danamon_configs':
+        handleDanamonConfigs(); break;
+
     case 'api_json':
         handleApiJson(); break;
 
@@ -1517,6 +1520,321 @@ function handleTrxCreate(): void {
     });
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// DANAMON CONFIG MANAGER
+// ══════════════════════════════════════════════════════════════════════
+function handleDanamonConfigs(): void {
+    requireLogin();
+    if (!isAdmin()) { flash('error', 'Akses ditolak'); redirect('?page=home'); return; }
+
+    $action = $_GET['action'] ?? 'list';
+    $method = $_SERVER['REQUEST_METHOD'];
+
+    // ── Aktivasi / Non-aktif ──
+    if ($action === 'toggle' && isset($_GET['id'])) {
+        $cfg = DB::row("SELECT * FROM `danamon_configs` WHERE `id`=?", [(int)$_GET['id']]);
+        if ($cfg) {
+            $newActive = $cfg['is_active'] ? 0 : 1;
+            DB::exec("UPDATE `danamon_configs` SET `is_active`=? WHERE `id`=?", [$newActive, (int)$_GET['id']]);
+            flash('success', "Config '{$cfg['name']}' " . ($newActive ? 'diaktifkan' : 'dinonaktifkan') . '.');
+        }
+        redirect('?page=danamon_configs');
+        return;
+    }
+
+    // ── Set sebagai default (aktifkan satu, nonaktifkan lainnya) ──
+    if ($action === 'set_default' && isset($_GET['id'])) {
+        DB::exec("UPDATE `danamon_configs` SET `is_active`=0");
+        DB::exec("UPDATE `danamon_configs` SET `is_active`=1 WHERE `id`=?", [(int)$_GET['id']]);
+        flash('success', 'Config default berhasil diatur.');
+        redirect('?page=danamon_configs');
+        return;
+    }
+
+    // ── Hapus ──
+    if ($action === 'delete' && isset($_GET['id']) && $method === 'POST') {
+        DB::exec("DELETE FROM `danamon_configs` WHERE `id`=?", [(int)$_GET['id']]);
+        flash('success', 'Config dihapus.');
+        redirect('?page=danamon_configs');
+        return;
+    }
+
+    // ── Edit / Tambah ──
+    if ($method === 'POST' && in_array($action, ['add','edit'])) {
+        $id          = (int)($_POST['id']           ?? 0);
+        $name        = trim($_POST['name']           ?? '');
+        $baseUrl     = trim($_POST['base_url']       ?? '');
+        $partnerId   = trim($_POST['partner_id']     ?? '');
+        $channelId   = trim($_POST['channel_id']     ?? '');
+        $clientId    = trim($_POST['client_id']      ?? '');
+        $clientSec   = trim($_POST['client_secret']  ?? '');
+        $isActive    = (int)($_POST['is_active']     ?? 1);
+
+        if (!$name || !$baseUrl || !$partnerId) {
+            flash('error', 'Nama, Base URL, dan Partner ID wajib diisi.');
+            redirect("?page=danamon_configs&action={$action}" . ($id ? "&id={$id}" : ''));
+            return;
+        }
+
+        if ($action === 'add') {
+            DB::exec(
+                "INSERT INTO `danamon_configs` (`name`,`base_url`,`partner_id`,`channel_id`,`client_id`,`client_secret`,`is_active`) VALUES (?,?,?,?,?,?,?)",
+                [$name, $baseUrl, $partnerId, $channelId, $clientId, $clientSec, $isActive]
+            );
+            flash('success', "Config '{$name}' berhasil ditambahkan.");
+        } else {
+            $sets = "`name`=?,`base_url`=?,`partner_id`=?,`channel_id`=?,`is_active`=?";
+            $params = [$name, $baseUrl, $partnerId, $channelId, $isActive];
+            if ($clientSec !== '') { $sets .= ",`client_secret`=?"; $params[] = $clientSec; }
+            if ($clientId  !== '') { $sets .= ",`client_id`=?";     $params[] = $clientId; }
+            $params[] = $id;
+            DB::exec("UPDATE `danamon_configs` SET {$sets} WHERE `id`=?", $params);
+            flash('success', "Config '{$name}' berhasil disimpan.");
+        }
+        redirect('?page=danamon_configs');
+        return;
+    }
+
+    $configs = [];
+    try {
+        $configs = DB::query("SELECT id,name,base_url,partner_id,channel_id,client_id,is_active,created_at FROM `danamon_configs` ORDER BY id ASC");
+    } catch (Throwable) {}
+
+    $editItem = null;
+    if ($action === 'edit' && isset($_GET['id'])) {
+        $editItem = DB::row("SELECT * FROM `danamon_configs` WHERE `id`=?", [(int)$_GET['id']]);
+    }
+
+    renderLayout('Danamon Config', fn() => renderDanamonConfigsPage($configs, $editItem, $action));
+}
+
+function renderDanamonConfigsPage(array $configs, ?array $editItem, string $action): void { ?>
+<div class="mb-6 flex items-center justify-between">
+  <div>
+    <h1 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+      <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.608 3.292 0z M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      Danamon Config Manager
+    </h1>
+    <p class="text-sm text-slate-500 mt-0.5">Konfigurasi koneksi ke Transporter Danamon SNAP API</p>
+  </div>
+  <?php if ($action !== 'add'): ?>
+  <a href="?page=danamon_configs&action=add" class="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+    Tambah Config
+  </a>
+  <?php endif; ?>
+</div>
+
+<?php if (in_array($action, ['add','edit'])): ?>
+<div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm mb-6 p-6">
+  <h2 class="text-sm font-bold text-slate-700 dark:text-slate-200 mb-4"><?= $action === 'add' ? '➕ Tambah Config Baru' : '✏️ Edit Config' ?></h2>
+  <form method="POST" action="?page=danamon_configs&action=<?= $action ?><?= $editItem ? '&id='.(int)$editItem['id'] : '' ?>" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+    <?php if ($editItem): ?><input type="hidden" name="id" value="<?= (int)$editItem['id'] ?>"><?php endif; ?>
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Nama Config <span class="text-red-400">*</span></label>
+      <input type="text" name="name" value="<?= h($editItem['name'] ?? '') ?>" placeholder="cth: Production BDI SNAP"
+        class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Base URL Transporter <span class="text-red-400">*</span></label>
+      <input type="text" name="base_url" value="<?= h($editItem['base_url'] ?? '') ?>" placeholder="http://10.2.3.117:8099/transporter/transaksi"
+        class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Partner ID (X-PARTNER-ID) <span class="text-red-400">*</span></label>
+      <input type="text" name="partner_id" value="<?= h($editItem['partner_id'] ?? '') ?>" placeholder="482d0496-8949-4f04-993a-b8a3ae098df9"
+        class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Channel ID</label>
+      <input type="text" name="channel_id" value="<?= h($editItem['channel_id'] ?? '') ?>" placeholder="95221"
+        class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Client ID</label>
+      <input type="text" name="client_id" value="<?= h($editItem['client_id'] ?? '') ?>" placeholder="ecc069f8-5b9f-4046-9c49-..."
+        class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+    </div>
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Client Secret <?= $editItem ? '<span class="font-normal text-slate-400">(kosong = tidak ubah)</span>' : '' ?></label>
+      <input type="password" name="client_secret" value="" placeholder="<?= $editItem ? '(tidak diubah)' : 'client secret...' ?>"
+        class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+    </div>
+    <div class="sm:col-span-2 flex items-center gap-3">
+      <label class="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+        <input type="checkbox" name="is_active" value="1" <?= ($editItem['is_active'] ?? 1) ? 'checked' : '' ?> class="rounded"> Aktif
+      </label>
+      <button type="submit" class="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors">
+        Simpan
+      </button>
+      <a href="?page=danamon_configs" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 transition-colors">Batal</a>
+    </div>
+  </form>
+</div>
+<?php endif; ?>
+
+<div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+          <th class="px-4 py-3 text-left">ID</th>
+          <th class="px-4 py-3 text-left">Nama</th>
+          <th class="px-4 py-3 text-left">Base URL</th>
+          <th class="px-4 py-3 text-left">Partner ID</th>
+          <th class="px-4 py-3 text-left">Channel</th>
+          <th class="px-4 py-3 text-center">Status</th>
+          <th class="px-4 py-3 text-center">Aksi</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+        <?php if (empty($configs)): ?>
+        <tr><td colspan="7" class="px-4 py-10 text-center text-slate-400 italic">Belum ada config. <a href="?page=danamon_configs&action=add" class="text-indigo-600 hover:underline">Tambah sekarang</a>.</td></tr>
+        <?php else: foreach ($configs as $c): ?>
+        <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+          <td class="px-4 py-3 font-mono text-xs text-slate-400"><?= (int)$c['id'] ?></td>
+          <td class="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200"><?= h($c['name']) ?></td>
+          <td class="px-4 py-3 font-mono text-xs text-slate-500 max-w-[200px] truncate" title="<?= h($c['base_url']) ?>"><?= h($c['base_url']) ?></td>
+          <td class="px-4 py-3 font-mono text-xs text-slate-500 max-w-[160px] truncate" title="<?= h($c['partner_id']) ?>"><?= h(substr($c['partner_id'],0,20)).'...' ?></td>
+          <td class="px-4 py-3 font-mono text-xs text-slate-500"><?= h($c['channel_id']) ?></td>
+          <td class="px-4 py-3 text-center">
+            <?php if ($c['is_active']): ?>
+            <span class="px-2 py-0.5 text-xs font-bold rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300">✓ Aktif</span>
+            <?php else: ?>
+            <span class="px-2 py-0.5 text-xs rounded-full bg-slate-100 text-slate-500 dark:bg-gray-700">Non-aktif</span>
+            <?php endif; ?>
+          </td>
+          <td class="px-4 py-3">
+            <div class="flex items-center justify-center gap-1">
+              <a href="?page=danamon_configs&action=set_default&id=<?= (int)$c['id'] ?>" class="text-xs px-2 py-1 rounded border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 hover:bg-indigo-50 hover:border-indigo-300 dark:hover:bg-indigo-900/20 transition-colors" title="Jadikan Default">⭐</a>
+              <a href="?page=danamon_configs&action=edit&id=<?= (int)$c['id'] ?>" class="text-xs px-2 py-1 rounded border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-gray-700 transition-colors">Edit</a>
+              <form method="POST" action="?page=danamon_configs&action=delete&id=<?= (int)$c['id'] ?>" class="inline" onsubmit="return confirm('Hapus config \'<?= h($c['name']) ?>\'?')">
+                <button type="submit" class="text-xs px-2 py-1 rounded border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">Hapus</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        <?php endforeach; endif; ?>
+      </tbody>
+    </table>
+  </div>
+</div>
+<?php }
+
+// ══════════════════════════════════════════════════════════════════════
+// SNAP / DANAMON TRANSPORTER HELPERS
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * Ambil config Danamon aktif dari tabel danamon_configs.
+ * Jika $configId diberikan, ambil berdasarkan id; jika null ambil is_active=1 pertama.
+ */
+function getActiveDanamonConfig(?int $configId = null): ?array {
+    try {
+        if ($configId) {
+            return DB::row("SELECT * FROM `danamon_configs` WHERE `id` = ? AND `is_active` = 1", [$configId]);
+        }
+        return DB::row("SELECT * FROM `danamon_configs` WHERE `is_active` = 1 ORDER BY `id` ASC LIMIT 1");
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+/**
+ * Panggil Transporter untuk transaksi BiF / Online Transfer.
+ *
+ * Payload ke Transporter (format dari danamon_dispatch_logs production):
+ *   {
+ *     "module": "danamon",
+ *     "protocol": "bifast",          ← atau "online" untuk PAYTFDANA trxType=01
+ *     "signature": "<sha256(partner_id+channel_id+client_secret)>",
+ *     "event_data": {
+ *       "config": {
+ *         "base_url":      "<transporter_url>",
+ *         "channel_id":    "<channel_id>",
+ *         "partner_id":    "<partner_id>",
+ *         "client_secret": "<client_secret>",
+ *         "client_id":     "<client_id>"
+ *       },
+ *       "faktur":       "<partnerReferenceNo>",
+ *       "access_token": "",                    ← Transporter ambil sendiri
+ *       "trx_order":    <TRXOrder object>
+ *     }
+ *   }
+ *
+ * Return: ['success'=>bool, 'response'=>array, 'http_code'=>int, 'raw'=>string]
+ */
+function snapCallTransporter(array $cfg, array $trxOrder, string $protocol = 'bifast'): array {
+    $baseUrl      = rtrim($cfg['base_url'] ?? '', '/');
+    $partnerId    = $cfg['partner_id']    ?? '';
+    $channelId    = $cfg['channel_id']    ?? '';
+    $clientSecret = $cfg['client_secret'] ?? '';
+    $clientId     = $cfg['client_id']     ?? '';
+
+    // Signature: sha256(partner_id + channel_id + client_secret)
+    $signature = hash('sha256', $partnerId . $channelId . $clientSecret);
+
+    $payload = json_encode([
+        'module'     => 'danamon',
+        'protocol'   => $protocol,
+        'signature'  => $signature,
+        'event_data' => [
+            'config' => [
+                'base_url'      => $baseUrl,
+                'channel_id'    => $channelId,
+                'partner_id'    => $partnerId,
+                'client_secret' => $clientSecret,
+                'client_id'     => $clientId,
+            ],
+            'faktur'       => $trxOrder['partnerReferenceNo'] ?? '',
+            'access_token' => '',
+            'trx_order'    => $trxOrder,
+        ],
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init($baseUrl);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 30,
+        CURLOPT_HTTPHEADER     => [
+            'Content-Type: application/json',
+            'Accept: application/json',
+        ],
+    ]);
+    $raw      = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+
+    if ($curlErr || $raw === false) {
+        return [
+            'success'   => false,
+            'response'  => ['responseCode' => '5000000', 'responseMessage' => 'cURL Error: ' . $curlErr],
+            'http_code' => $httpCode,
+            'raw'       => (string)$raw,
+        ];
+    }
+
+    $decoded = json_decode($raw, true);
+    // Transporter async: {"status":"accepted","message":"...","faktur":"PJ000xxx"}
+    // Transporter sync / SNAP direct: {"responseCode":"2001800","responseMessage":"Successful",...}
+    $success = in_array($httpCode, [200, 201, 202]) && is_array($decoded) &&
+               !isset($decoded['error']) &&
+               (
+                   ($decoded['status'] ?? '') === 'accepted' ||
+                   str_starts_with((string)($decoded['responseCode'] ?? ''), '2')
+               );
+
+    return [
+        'success'   => $success,
+        'response'  => $decoded ?? ['responseMessage' => $raw],
+        'http_code' => $httpCode,
+        'raw'       => $raw,
+    ];
+}
+
 // ── PERSETUJUAN TRANSAKSI ─────────────────────────────────────────────
 function handleTrxApprove(): void {
     requireLogin();
@@ -1597,7 +1915,123 @@ function handleTrxApprove(): void {
             return;
         }
 
-        // Update status
+        // ── Khusus: pulsa_penjualan PAYBIFAST/PAYTFDANA → panggil Transporter ──
+        $snapExecuted = false;
+        if (
+            $action === 'approve' &&
+            preg_match('/^pulsa_penjualan/', $table) &&
+            in_array(strtoupper((string)($row['Kode'] ?? '')), ['PAYBIFAST','PAYTFDANA'])
+        ) {
+            $kode        = strtoupper((string)($row['Kode'] ?? ''));
+            $configId    = (int)($_POST['danamon_config_id'] ?? 0) ?: null;
+            $danamonCfg  = getActiveDanamonConfig($configId);
+
+            if (!$danamonCfg) {
+                flash('error', 'Konfigurasi Danamon aktif tidak ditemukan. Silakan tambahkan di menu Danamon Config.');
+                redirect("?page={$back}");
+                return;
+            }
+
+            // Parse TRXOrder yang sudah tersimpan di DB
+            $trxOrderRaw  = (string)($row['TRXOrder'] ?? '{}');
+            $trxOrderData = json_decode($trxOrderRaw, true) ?? [];
+
+            // Tentukan protocol: PAYBIFAST = bifast (trxType=02), PAYTFDANA = online (trxType=01)
+            $trxType  = (string)($trxOrderData['additionalInfo']['trxType'] ?? '02');
+            $protocol = ($kode === 'PAYBIFAST' || $trxType === '02') ? 'bifast' : 'online';
+
+            // Panggil Transporter
+            $result = snapCallTransporter($danamonCfg, $trxOrderData, $protocol);
+
+            // Bangun TRXOrderResponse dari hasil
+            $respData       = $result['response'];
+            $snapSuccess    = $result['success'];
+            $bifRef         = $respData['additionalInfo']['bifReferenceNo'] ?? ($respData['faktur'] ?? '');
+            $responseCode   = $respData['responseCode']   ?? ($snapSuccess ? '2001800' : '5000000');
+            $responseMsg    = $respData['responseMessage'] ?? ($snapSuccess ? 'Successful' : 'FAILED');
+
+            $trxOrderResp = array_merge(
+                // Skeleton sebelumnya
+                json_decode((string)($row['TRXOrderResponse'] ?? '{}'), true) ?? [],
+                // Timpa dengan data response nyata
+                [
+                    'responseCode'         => $responseCode,
+                    'responseMessage'      => $responseMsg,
+                    'referenceNo'          => $respData['referenceNo'] ?? $trxOrderData['partnerReferenceNo'] ?? '',
+                    'partnerReferenceNo'   => $trxOrderData['partnerReferenceNo'] ?? '',
+                    'amount'               => $trxOrderData['amount'] ?? [],
+                    'beneficiaryAccountNo' => $trxOrderData['beneficiaryAccountNo'] ?? '',
+                    'beneficiaryBankCode'  => $trxOrderData['beneficiaryBankCode'] ?? '',
+                    'sourceAccountNo'      => $trxOrderData['sourceAccountNo'] ?? '',
+                    'additionalInfo'       => [
+                        'transferDescription' => $trxOrderData['additionalInfo']['transferDescription'] ?? '',
+                        'trxPurposeCode'      => $trxOrderData['additionalInfo']['trxPurposeCode'] ?? '99',
+                        'bifReferenceNo'      => $bifRef,
+                        'transactionDate'     => $trxOrderData['transactionDate'] ?? date('Y-m-d\TH:i:sP'),
+                    ],
+                ]
+            );
+
+            // Jika Transporter mengembalikan SN / referenceNo di response langsung, simpan ke SN
+            $snValue = $respData['referenceNo'] ?? $bifRef ?? $row['SN'] ?? '';
+
+            if ($snapSuccess) {
+                // Sukses: update Status=S, TRXOrderResponse=response, SN=ref, DateTimeClose=now
+                DB::exec(
+                    "UPDATE `{$table}` SET
+                        `Status` = 'S',
+                        `TRXOrderResponse` = ?,
+                        `SN` = ?,
+                        `DateTimeClose` = ?
+                     WHERE `{$pkCol}` = ?",
+                    [
+                        json_encode($trxOrderResp, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+                        $snValue,
+                        time(),
+                        $id,
+                    ]
+                );
+                flash('success', "Transaksi #{$id} ({$kode}) berhasil dikirim ke Transporter. ResponseCode: {$responseCode} | Ref: {$bifRef}");
+                logActivity('trx_approve_snap', [
+                    'table'     => $table,
+                    'id'        => $id,
+                    'kode'      => $kode,
+                    'protocol'  => $protocol,
+                    'http_code' => $result['http_code'],
+                    'response'  => $responseCode . ' ' . $responseMsg,
+                    'bif_ref'   => $bifRef,
+                ]);
+            } else {
+                // Gagal: update Status=G, TRXOrderResponse=response error
+                DB::exec(
+                    "UPDATE `{$table}` SET
+                        `Status` = 'G',
+                        `TRXOrderResponse` = ?,
+                        `DateTimeClose` = ?
+                     WHERE `{$pkCol}` = ?",
+                    [
+                        json_encode($trxOrderResp, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT),
+                        time(),
+                        $id,
+                    ]
+                );
+                flash('error', "Transaksi #{$id} ({$kode}) GAGAL. HTTP {$result['http_code']}: {$responseCode} – {$responseMsg}");
+                logActivity('trx_approve_snap_failed', [
+                    'table'     => $table,
+                    'id'        => $id,
+                    'kode'      => $kode,
+                    'protocol'  => $protocol,
+                    'http_code' => $result['http_code'],
+                    'response'  => $responseCode . ' ' . $responseMsg,
+                    'raw'       => substr($result['raw'], 0, 500),
+                ]);
+            }
+            redirect("?page={$back}");
+            return;
+        }
+        // ── /Khusus SNAP ──────────────────────────────────────────────────
+
+        // Update status (non-SNAP atau reject)
         $sql    = "UPDATE `{$table}` SET `{$stCol}` = ?";
         $params = [$newStatus];
 
@@ -1653,8 +2087,13 @@ function handleTrxApprove(): void {
 
     $totalPending = count($pendingDanamon) + count($pendingDwallet) + count($pendingQris) + count($pulsaPending);
 
-    renderLayout('Antrian Persetujuan', function() use ($pendingDanamon,$pendingDwallet,$pendingQris,$pulsaPending,$totalPending) {
-        renderTrxApprovePage($pendingDanamon,$pendingDwallet,$pendingQris,$pulsaPending,$totalPending);
+    $danamonConfigs = [];
+    try {
+        $danamonConfigs = DB::query("SELECT id, name, base_url, partner_id, channel_id, is_active FROM `danamon_configs` WHERE `is_active` = 1 ORDER BY id ASC");
+    } catch (Throwable) {}
+
+    renderLayout('Antrian Persetujuan', function() use ($pendingDanamon,$pendingDwallet,$pendingQris,$pulsaPending,$totalPending,$danamonConfigs) {
+        renderTrxApprovePage($pendingDanamon,$pendingDwallet,$pendingQris,$pulsaPending,$totalPending,$danamonConfigs);
     });
 }
 
@@ -1818,7 +2257,8 @@ tailwind.config = {
         ['page' => 'trx_pulsa',    'icon' => 'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z', 'text' => 'Penjualan Pulsa'],
         ['page' => 'trx_qris',     'icon' => 'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8H3a2 2 0 00-2 2v8a2 2 0 002 2h4.01M9 8V5a2 2 0 012-2h2a2 2 0 012 2v3m-3 0h.01', 'text' => 'Transaksi QRIS'],
         ['page' => 'trx_create',   'icon' => 'M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z', 'text' => 'Buat Transaksi'],
-        ['page' => 'trx_approve',  'icon' => 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z', 'text' => 'Antrian Persetujuan'],
+        ['page' => 'trx_approve',     'icon' => 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z', 'text' => 'Antrian Persetujuan'],
+        ['page' => 'danamon_configs', 'icon' => 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.608 3.292 0z M15 12a3 3 0 11-6 0 3 3 0 016 0z', 'text' => 'Danamon Config', 'admin' => true],
         'sep',
         ['page' => 'users',        'icon' => 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.653-.165-1.294-.478-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.653.165-1.294.478-1.857m0 0a5.002 5.002 0 019.044 0M9 13a2 2 0 11-4 0 2 2 0 014 0zm9 0a2 2 0 11-4 0 2 2 0 014 0z', 'text' => 'Pengguna', 'admin' => true],
         ['page' => 'roles',        'icon' => 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z', 'text' => 'Master Peran', 'admin' => true],
@@ -4745,7 +5185,7 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
 }
 
 // ─── RENDER: ANTRIAN PERSETUJUAN ──────────────────────────────────────
-function renderTrxApprovePage(array $pendingDanamon, array $pendingDwallet, array $pendingQris, array $pulsaPending, int $totalPending): void {
+function renderTrxApprovePage(array $pendingDanamon, array $pendingDwallet, array $pendingQris, array $pulsaPending, int $totalPending, array $danamonConfigs = []): void {
     ?>
     <!-- Header -->
     <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -4899,19 +5339,120 @@ function renderTrxApprovePage(array $pendingDanamon, array $pendingDwallet, arra
         'qris_transactions', 'id', 'trx_qris',
         'text-orange-600', 'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01');
 
-    // Pulsa: group by table name
+    // Pulsa: custom render with danamon_config_id dropdown for PAYBIFAST/PAYTFDANA
     if (!empty($pulsaPending)):
         $byTable = [];
         foreach ($pulsaPending as $r) {
             $t = $r['_table'];
             $byTable[$t][] = $r;
         }
-        foreach ($byTable as $tbl => $tRows):
-            $yr = substr($tbl, -4);
-            $renderApprovalTable("Penjualan Pulsa {$yr}", "pulsa_{$yr}", $tRows,
-                $tbl, 'ID', 'trx_pulsa',
-                'text-purple-600', 'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z');
-        endforeach;
+        foreach ($byTable as $tbl => $tRows): ?>
+    <div class="mb-6 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-gray-700 bg-slate-50 dark:bg-gray-750">
+        <div class="flex items-center gap-2">
+          <svg class="w-4 h-4 text-purple-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+          <h2 class="text-sm font-bold text-slate-700 dark:text-slate-200">Penjualan Pulsa</h2>
+          <span class="px-2 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"><?= count($tRows) ?></span>
+        </div>
+        <?php if (!empty($danamonConfigs)): ?>
+        <div class="flex items-center gap-2 text-xs text-slate-500">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.608 3.292 0z M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          Config aktif: <strong class="text-slate-700 dark:text-slate-300"><?= h($danamonConfigs[0]['name'] ?? '-') ?></strong>
+        </div>
+        <?php else: ?>
+        <a href="?page=danamon_configs" class="text-xs text-red-500 hover:underline">⚠ Belum ada Danamon Config aktif</a>
+        <?php endif; ?>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">ID</th>
+              <th class="px-4 py-3 text-left">Nomor / Ref</th>
+              <th class="px-4 py-3 text-left">Kode</th>
+              <th class="px-4 py-3 text-left">Customer → HP</th>
+              <th class="px-4 py-3 text-right">Nominal</th>
+              <th class="px-4 py-3 text-left">Waktu</th>
+              <th class="px-4 py-3 text-center">Aksi</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php foreach ($tRows as $r):
+                $isSnap = in_array(strtoupper((string)($r['info'] ?? '')), ['13']) || in_array(strtoupper((string)($r['faktur'] ?? '')), ['PAYBIFAST','PAYTFDANA']);
+                // Ambil kode dari _table lookup — data antrian hanya punya faktur & info
+                // Untuk deteksi SNAP kita gunakan field faktur (=Nomor) → bisa juga dari info=JenisTrx
+                // Cara terbaik: lihat TRXOrder di DB, tapi kita hanya punya data ringkasan di $r
+                // Gunakan info (=JenisTrx) === '13' sebagai penanda SNAP BiF
+                $isSnap = (string)($r['info'] ?? '') === '13';
+            ?>
+            <tr class="hover:bg-amber-50 dark:hover:bg-amber-900/10 transition-colors">
+              <td class="px-4 py-3 font-mono text-xs text-slate-400">#<?= (int)$r['trx_id'] ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-blue-600 dark:text-blue-400 max-w-[140px] truncate"><?= h((string)($r['faktur'] ?? '—')) ?></td>
+              <td class="px-4 py-3">
+                <span class="px-2 py-0.5 text-xs rounded-full <?= $isSnap ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300' : 'bg-slate-100 text-slate-600 dark:bg-gray-700 dark:text-slate-300' ?> font-medium">JenisTrx <?= h((string)($r['info'] ?? '—')) ?></span>
+              </td>
+              <td class="px-4 py-3 text-xs text-slate-500">
+                <?= h((string)($r['src'] ?? '')) ?>
+                <?php if ($r['dst']): ?><span class="mx-1 text-slate-300">→</span><?= h((string)$r['dst']) ?><?php endif; ?>
+              </td>
+              <td class="px-4 py-3 text-right font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                <?= ($r['amount'] ?? 0) > 0 ? rupiah((float)$r['amount']) : '<span class="text-slate-400">—</span>' ?>
+              </td>
+              <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap">
+                <?php echo is_numeric($r['ts']) && $r['ts'] > 1e9 ? date('d/m/Y H:i', (int)$r['ts']) : h(substr((string)($r['ts'] ?? ''), 0, 16)); ?>
+              </td>
+              <td class="px-4 py-3">
+                <div class="flex flex-col items-center gap-1.5">
+                  <?php if ($isSnap && !empty($danamonConfigs)): ?>
+                  <!-- SNAP: dropdown config + tombol Kirim ke Transporter -->
+                  <form method="POST" action="?page=trx_approve" class="flex flex-col gap-1" onsubmit="return confirm('Kirim PAYBIFAST/PAYTFDANA #<?= (int)$r['trx_id'] ?> ke Transporter Danamon?')">
+                    <input type="hidden" name="table" value="<?= h($tbl) ?>">
+                    <input type="hidden" name="pk" value="ID">
+                    <input type="hidden" name="id" value="<?= (int)$r['trx_id'] ?>">
+                    <input type="hidden" name="action" value="approve">
+                    <input type="hidden" name="back" value="trx_approve">
+                    <?php if (count($danamonConfigs) > 1): ?>
+                    <select name="danamon_config_id" class="text-xs px-2 py-1 border border-slate-200 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-slate-700 dark:text-slate-200 mb-0.5">
+                      <?php foreach ($danamonConfigs as $dc): ?>
+                      <option value="<?= (int)$dc['id'] ?>"><?= h($dc['name']) ?></option>
+                      <?php endforeach; ?>
+                    </select>
+                    <?php else: ?>
+                    <input type="hidden" name="danamon_config_id" value="<?= (int)($danamonConfigs[0]['id'] ?? 0) ?>">
+                    <?php endif; ?>
+                    <button type="submit" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-purple-600 hover:bg-purple-700 text-white transition-colors whitespace-nowrap">
+                      ⚡ Kirim SNAP
+                    </button>
+                  </form>
+                  <?php elseif ($isSnap): ?>
+                  <a href="?page=danamon_configs" class="px-3 py-1.5 text-xs rounded-lg bg-red-100 text-red-600 hover:bg-red-200 transition-colors">⚠ Setup Config</a>
+                  <?php else: ?>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Setujui transaksi #<?= (int)$r['trx_id'] ?>?')">
+                    <input type="hidden" name="table" value="<?= h($tbl) ?>">
+                    <input type="hidden" name="pk" value="ID">
+                    <input type="hidden" name="id" value="<?= (int)$r['trx_id'] ?>">
+                    <input type="hidden" name="action" value="approve">
+                    <input type="hidden" name="back" value="trx_approve">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-green-100 text-green-700 hover:bg-green-600 hover:text-white transition-colors">✓ Setuju</button>
+                  </form>
+                  <?php endif; ?>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Tolak transaksi #<?= (int)$r['trx_id'] ?>?')">
+                    <input type="hidden" name="table" value="<?= h($tbl) ?>">
+                    <input type="hidden" name="pk" value="ID">
+                    <input type="hidden" name="id" value="<?= (int)$r['trx_id'] ?>">
+                    <input type="hidden" name="action" value="reject">
+                    <input type="hidden" name="back" value="trx_approve">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-red-100 text-red-700 hover:bg-red-600 hover:text-white transition-colors">✕ Tolak</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+    </div>
+        <?php endforeach;
     endif;
     ?>
     <?php endif; ?>
