@@ -1169,6 +1169,99 @@ function handleTrxCreate(): void {
                     logActivity('trx_create', "Buat qris_transactions ext_id={$extId} merchant={$merchantId}");
                     break;
 
+                // ── Penjualan Pulsa ────────────────────────────────────
+                case 'pulsa':
+                    $jenisTrx      = trim($_POST['JenisTrx']      ?? '');
+                    $kode          = trim($_POST['Kode']           ?? '');
+                    $hp            = trim($_POST['HP']             ?? '');
+                    $hpSender      = trim($_POST['HPSender']       ?? '');
+                    $kodeCustomer  = trim($_POST['KodeCustomer']   ?? '');
+                    $hjNasabah     = (float)($_POST['HJ_Nasabah']  ?? 0);
+                    $hj            = (float)($_POST['HJ']          ?? 0);
+                    $hb            = (float)($_POST['HB']          ?? 0);
+                    $supplier      = trim($_POST['Supplier']       ?? '0001');
+                    $mbanking      = trim($_POST['MBanking']       ?? '0');
+                    $protocol      = trim($_POST['Protocol']       ?? 'H');
+                    $sender        = trim($_POST['Sender']         ?? '');
+                    $jenisTrxBayar = trim($_POST['Jenis']          ?? 'P');
+                    // Kolom khusus transfer (RekTujuanTFDana / PAYBIFAST / PAYTFDANA)
+                    $rekTujuan     = trim($_POST['RekTujuanTFDana']   ?? '');
+                    $bankTujuan    = trim($_POST['BankTujuanTFDana']  ?? '');
+                    $namaTujuan    = trim($_POST['NamaTujuanTFDana']  ?? '');
+                    // Nomor dokumen
+                    $nomor         = trim($_POST['Nomor']          ?? '');
+                    $seri          = trim($_POST['Seri']           ?? '');
+                    $idtrxOrder    = trim($_POST['IDTRXOrder']     ?? '');
+                    $keterangan    = trim($_POST['keterangan_pulsa'] ?? '');
+                    $tgl           = trim($_POST['Tgl']            ?? date('Y-m-d'));
+
+                    if (!$hp) throw new RuntimeException('Nomor HP Tujuan wajib diisi.');
+                    if (!$kode) throw new RuntimeException('Kode Produk wajib diisi.');
+                    if (!$kodeCustomer) throw new RuntimeException('Kode Customer wajib diisi.');
+                    if ($hjNasabah <= 0) throw new RuntimeException('HJ Nasabah (Harga Jual ke Pelanggan) harus lebih dari 0.');
+
+                    // Tentukan tabel pulsa berdasarkan tahun tanggal transaksi
+                    $tahun = substr($tgl, 0, 4);
+                    $tblPulsa = "pulsa_penjualan_{$tahun}";
+                    $nowTs = time();
+
+                    // Auto-generate Nomor jika kosong: format mirip SL0xxxxx
+                    if (!$nomor) {
+                        $nomor = 'SL0' . substr(md5(uniqid('', true)), 0, 6);
+                    }
+
+                    // Build req_payload (TRXOrder) sesuai format real
+                    $trxOrderPayload = json_encode([
+                        'KodeCustomer'     => $kodeCustomer,
+                        'JenisTrx'         => $jenisTrx,
+                        'Kode'             => $kode,
+                        'HP'               => $hp,
+                        'HJ_Nasabah'       => $hjNasabah,
+                        'HJ'               => $hj,
+                        'HB'               => $hb,
+                        'Supplier'         => $supplier,
+                        'RekTujuanTFDana'  => $rekTujuan,
+                        'BankTujuanTFDana' => $bankTujuan,
+                        'NamaTujuanTFDana' => $namaTujuan,
+                        'keterangan'       => $keterangan,
+                    ], JSON_UNESCAPED_UNICODE);
+
+                    DB::exec(
+                        "INSERT INTO `{$tblPulsa}`
+                         (Jenis, Nomor, Tgl, KodeCustomer, MBanking, JenisTrx, Kode, HP, HPSender,
+                          HJ_Nasabah, HJ, HB, BonusCustomer, Discount, Supplier, Status,
+                          SN, DateTime, DateTimeClose, Protocol, IMID, Sender,
+                          StatusReplay, StatusNotifikasiPending, RO, Response, ResendOrderTime,
+                          TrxID, Fastpay_Ref, IDTRXOrder, IDTRXJawaban, SMSBanking, ID_SMSBanking,
+                          TRXOrder, TRXOrderResponse, AdditionalData,
+                          Telkom_IDPEL, BPJS_IDPEL, Speedy_IDPEL, PDAM_IDPEL, PDAM_Kota,
+                          PLN_IDPEL, PLN_Nama, PLN_Token,
+                          Finance_IDPEL, Finance_Kode, OpenDenom_IDPEL, OpenDenom_Kode,
+                          RekTujuanTFDana, BankTujuanTFDana, NamaTujuanTFDana,
+                          CustomerMasking, SolusiGagal, KonfirmasiGagal,
+                          Nomor_Tagihan, Jenis_Tagihan, Seri,
+                          NomorDepositCustomer, NomorDepositSupplier, is_payment)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        [
+                            $jenisTrxBayar, $nomor, $tgl, $kodeCustomer, $mbanking, $jenisTrx, $kode, $hp, $hpSender ?: $hp,
+                            $hjNasabah, $hj, $hb, 0, 0, $supplier, 'P',
+                            '', $nowTs, 0, $protocol, '', $sender ?: '',
+                            '0', '0', 0, '', $nowTs,
+                            '', '', $idtrxOrder ?: '', 0, '0', '',
+                            $trxOrderPayload, '', '',
+                            '', '', '', '', '',
+                            '', '', '',
+                            '', '', '', '',
+                            $rekTujuan, $bankTujuan, $namaTujuan,
+                            '', '', '',
+                            '', 'DP', $seri,
+                            '', '', 0,
+                        ]
+                    );
+                    $success = "Penjualan Pulsa berhasil dibuat di tabel <strong>{$tblPulsa}</strong>, nomor <strong>{$nomor}</strong>, status PENDING menunggu persetujuan.";
+                    logActivity('trx_create', "Buat {$tblPulsa} nomor={$nomor} kode={$kode} hp={$hp}");
+                    break;
+
                 default:
                     throw new RuntimeException('Jenis transaksi tidak dikenal.');
             }
@@ -3458,6 +3551,7 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
         'danamon' => ['label'=>'Transfer Bank (Danamon)', 'icon'=>'M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4'],
         'dwallet' => ['label'=>'D-Wallet',                'icon'=>'M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z'],
         'qris'    => ['label'=>'QRIS',                    'icon'=>'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01'],
+        'pulsa'   => ['label'=>'Penjualan Pulsa',         'icon'=>'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z'],
     ];
     ?>
     <div class="max-w-3xl mx-auto">
@@ -3644,23 +3738,198 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
               <a href="?page=trx_qris" class="px-4 py-2.5 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium transition-colors">Lihat Daftar</a>
             </div>
           </form>
+          <?php elseif ($activeType === 'pulsa'): ?>
+          <!-- ── Penjualan Pulsa Form ── -->
+          <form method="POST" action="?page=trx_create" class="space-y-6">
+            <input type="hidden" name="trx_type" value="pulsa">
+
+            <!-- Info Banner -->
+            <div class="flex items-start gap-2 p-3 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-purple-700 dark:text-purple-300 text-xs">
+              <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span>Data akan disimpan ke tabel <strong>pulsa_penjualan_[tahun]</strong> sesuai Tanggal Transaksi. Status awal: <strong>P (Pending)</strong> menunggu persetujuan.</span>
+            </div>
+
+            <!-- SEKSI 1: Info Dasar -->
+            <div>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Informasi Dasar</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Tanggal Transaksi <span class="text-red-500">*</span></label>
+                  <input type="date" name="Tgl" value="<?= date('Y-m-d') ?>" required
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Customer <span class="text-red-500">*</span></label>
+                  <input type="text" name="KodeCustomer" required placeholder="cth: A-000300"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Jenis Bayar</label>
+                  <select name="Jenis" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                    <option value="P">P – Penjualan</option>
+                    <option value="B">B – Bayar</option>
+                    <option value="R">R – Refund</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <!-- SEKSI 2: Produk & Tujuan -->
+            <div>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Produk & Tujuan</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Produk <span class="text-red-500">*</span></label>
+                  <input type="text" name="Kode" required placeholder="cth: PAYBIFAST, PAYTFDANA, XL10"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Jenis Transaksi (JenisTrx) <span class="text-red-500">*</span></label>
+                  <input type="text" name="JenisTrx" required placeholder="cth: 13, PP, PL, TF"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                  <p class="text-[10px] text-slate-400 mt-1">13=Transfer Dana · PP=Pulsa · PL=PLN · TF=Transfer Bank</p>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nomor HP Tujuan <span class="text-red-500">*</span></label>
+                  <input type="text" name="HP" required placeholder="cth: 085259070588"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nomor HP Sender</label>
+                  <input type="text" name="HPSender" placeholder="Sama dengan HP Tujuan jika kosong"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Supplier</label>
+                  <input type="text" name="Supplier" value="0024" placeholder="cth: 0024"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Sender (Agent)</label>
+                  <input type="text" name="Sender" placeholder="cth: bpr_pas"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+              </div>
+            </div>
+
+            <!-- SEKSI 3: Harga -->
+            <div>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Harga & Nominal</h3>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">HJ Nasabah (Harga Jual) <span class="text-red-500">*</span></label>
+                  <input type="number" name="HJ_Nasabah" min="1" step="100" required placeholder="500000"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                  <p class="text-[10px] text-slate-400 mt-1">Harga jual kepada pelanggan/nasabah</p>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">HJ (Harga Jual ke Supplier)</label>
+                  <input type="number" name="HJ" min="0" step="100" placeholder="500"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                  <p class="text-[10px] text-slate-400 mt-1">Biaya/fee ke supplier</p>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">HB (Harga Beli)</label>
+                  <input type="number" name="HB" min="0" step="100" placeholder="0"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                  <p class="text-[10px] text-slate-400 mt-1">Harga beli dari supplier</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- SEKSI 4: Transfer Dana (opsional) -->
+            <div>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Data Transfer Dana <span class="text-slate-300 font-normal normal-case">(isi jika JenisTrx = 13 / PAYBIFAST / PAYTFDANA)</span></h3>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">No. Rekening Tujuan</label>
+                  <input type="text" name="RekTujuanTFDana" placeholder="cth: 616401010159530"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Bank Tujuan</label>
+                  <input type="text" name="BankTujuanTFDana" placeholder="cth: BRINIDJA, 002, 014"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nama Pemilik Rekening</label>
+                  <input type="text" name="NamaTujuanTFDana" placeholder="cth: HERI SUWIGNYO"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+              </div>
+            </div>
+
+            <!-- SEKSI 5: Opsional -->
+            <div>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Data Tambahan <span class="text-slate-300 font-normal normal-case">(opsional)</span></h3>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nomor Surat/Ref</label>
+                  <input type="text" name="Nomor" placeholder="Auto-generate jika kosong"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">IDTRXOrder</label>
+                  <input type="text" name="IDTRXOrder" placeholder="cth: JB012026061300000050"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Seri</label>
+                  <input type="text" name="Seri" placeholder="Nomor seri (opsional)"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Protocol</label>
+                  <select name="Protocol" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                    <option value="H">H – HTTP</option>
+                    <option value="S">S – SMS</option>
+                    <option value="A">A – API</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">M-Banking</label>
+                  <select name="MBanking" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                    <option value="1">1 – Ya</option>
+                    <option value="0">0 – Tidak</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Keterangan</label>
+                  <input type="text" name="keterangan_pulsa" placeholder="Catatan tambahan"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-3 pt-2 border-t border-slate-100 dark:border-gray-700">
+              <button type="submit" class="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold rounded-lg transition-colors flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                Buat Penjualan Pulsa
+              </button>
+              <a href="?page=trx_pulsa" class="px-4 py-2.5 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium transition-colors">Lihat Daftar</a>
+            </div>
+          </form>
           <?php endif; ?>
         </div>
       </div>
 
       <!-- Quick Links -->
-      <div class="grid grid-cols-3 gap-3">
+      <div class="grid grid-cols-4 gap-3">
         <a href="?page=trx_approve" class="flex flex-col items-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm hover:border-indigo-300 dark:hover:border-indigo-600 transition-all group">
           <svg class="w-6 h-6 text-green-500 mb-2 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-          <span class="text-xs font-medium text-slate-600 dark:text-slate-300">Antrian Persetujuan</span>
+          <span class="text-xs font-medium text-slate-600 dark:text-slate-300 text-center">Antrian Persetujuan</span>
         </a>
         <a href="?page=trx_danamon" class="flex flex-col items-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm hover:border-indigo-300 dark:hover:border-indigo-600 transition-all group">
           <svg class="w-6 h-6 text-indigo-500 mb-2 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4"/></svg>
-          <span class="text-xs font-medium text-slate-600 dark:text-slate-300">Riwayat Bank</span>
+          <span class="text-xs font-medium text-slate-600 dark:text-slate-300 text-center">Riwayat Bank</span>
         </a>
         <a href="?page=trx_dwallet" class="flex flex-col items-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm hover:border-indigo-300 dark:hover:border-indigo-600 transition-all group">
           <svg class="w-6 h-6 text-blue-500 mb-2 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>
-          <span class="text-xs font-medium text-slate-600 dark:text-slate-300">Riwayat D-Wallet</span>
+          <span class="text-xs font-medium text-slate-600 dark:text-slate-300 text-center">Riwayat D-Wallet</span>
+        </a>
+        <a href="?page=trx_pulsa" class="flex flex-col items-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm hover:border-purple-300 dark:hover:border-purple-600 transition-all group">
+          <svg class="w-6 h-6 text-purple-500 mb-2 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+          <span class="text-xs font-medium text-slate-600 dark:text-slate-300 text-center">Riwayat Pulsa</span>
         </a>
       </div>
     </div>
