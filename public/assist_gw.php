@@ -297,6 +297,9 @@ switch ($page) {
     case 'trx_approve':
         handleTrxApprove(); break;
 
+    case 'api_json':
+        handleApiJson(); break;
+
     case 'scheduler':
         handleScheduler(); break;
 
@@ -1067,6 +1070,118 @@ function handleTrxQris(): void {
     renderLayout('Transaksi QRIS', function() use ($rows,$total,$page_n,$totalPages,$summary,$search,$status,$dateFrom,$dateTo,$limit) {
         renderTrxQrisPage($rows,$total,$page_n,$totalPages,$summary,$search,$status,$dateFrom,$dateTo,$limit);
     });
+}
+
+// ── API JSON (Auto-fill data endpoint) ───────────────────────────────
+function handleApiJson(): void {
+    requireLogin();
+    header('Content-Type: application/json; charset=utf-8');
+
+    $action = trim($_GET['action'] ?? '');
+
+    try {
+        switch ($action) {
+
+            // ── Semua customer aktif ──────────────────────────────────
+            case 'customers':
+                $rows = DB::query(
+                    "SELECT id, name, KodePro, user_h2h, phone, email, Kode, TipeAkun
+                     FROM customer
+                     WHERE status = 'active'
+                     ORDER BY name ASC",
+                    []
+                );
+                echo json_encode(['success' => true, 'data' => $rows]);
+                break;
+
+            // ── Detail satu customer (by id) ──────────────────────────
+            case 'customer_detail':
+                $id  = (int)($_GET['id'] ?? 0);
+                $row = DB::row(
+                    "SELECT id, name, KodePro, user_h2h, phone, email, Kode, TipeAkun, limit_ppob
+                     FROM customer WHERE id = ? LIMIT 1",
+                    [$id]
+                );
+                if (!$row) { echo json_encode(['success' => false, 'message' => 'Customer tidak ditemukan']); break; }
+                echo json_encode(['success' => true, 'data' => $row]);
+                break;
+
+            // ── Rekening Danamon (distinct source_account) ────────────
+            case 'danamon_accounts':
+                $rows = DB::query(
+                    "SELECT DISTINCT source_account AS account
+                     FROM danamon_transactions
+                     WHERE source_account IS NOT NULL AND source_account <> ''
+                     ORDER BY source_account ASC
+                     LIMIT 200",
+                    []
+                );
+                echo json_encode(['success' => true, 'data' => array_column($rows, 'account')]);
+                break;
+
+            // ── DWallet wallets (customer_code + account_number) ──────
+            case 'dwallet_wallets':
+                $rows = DB::query(
+                    "SELECT w.id, w.customer_code, w.account_number, w.balance, w.status,
+                            COALESCE(c.name,'') AS customer_name
+                     FROM dwallet_wallets w
+                     LEFT JOIN customer c ON c.KodePro = w.customer_code
+                     WHERE w.status = 'active'
+                     ORDER BY w.customer_code ASC
+                     LIMIT 500",
+                    []
+                );
+                echo json_encode(['success' => true, 'data' => $rows]);
+                break;
+
+            // ── QRIS merchants (distinct merchant_id) ─────────────────
+            case 'qris_merchants':
+                $rows = DB::query(
+                    "SELECT DISTINCT merchant_id AS merchant_id, '' AS terminal_id
+                     FROM qris_transactions
+                     WHERE merchant_id IS NOT NULL AND merchant_id <> ''
+                     ORDER BY merchant_id ASC
+                     LIMIT 200",
+                    []
+                );
+                // Juga ambil terminal_id per merchant
+                $merchants = [];
+                foreach ($rows as $r) {
+                    $term = DB::row(
+                        "SELECT terminal_id FROM qris_transactions
+                         WHERE merchant_id = ? AND terminal_id IS NOT NULL AND terminal_id <> ''
+                         ORDER BY created_at DESC LIMIT 1",
+                        [$r['merchant_id']]
+                    );
+                    $merchants[] = [
+                        'merchant_id' => $r['merchant_id'],
+                        'terminal_id' => $term['terminal_id'] ?? '',
+                    ];
+                }
+                echo json_encode(['success' => true, 'data' => $merchants]);
+                break;
+
+            // ── Produk Pulsa (distinct Kode dari pulsa_penjualan tahun ini) ──
+            case 'pulsa_products':
+                $tbl  = 'pulsa_penjualan_' . date('Y');
+                $rows = DB::query(
+                    "SELECT DISTINCT Kode, JenisTrx FROM `{$tbl}`
+                     WHERE Kode IS NOT NULL AND Kode <> ''
+                     ORDER BY Kode ASC LIMIT 300",
+                    []
+                );
+                echo json_encode(['success' => true, 'data' => $rows]);
+                break;
+
+            default:
+                http_response_code(400);
+                echo json_encode(['success' => false, 'message' => 'Action tidak dikenali']);
+        }
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+    }
+    exit;
 }
 
 // ── BUAT TRANSAKSI BARU ───────────────────────────────────────────────
@@ -3596,8 +3711,21 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
         <div class="p-6">
           <?php if ($activeType === 'danamon'): ?>
           <!-- ── Danamon Form ── -->
-          <form method="POST" action="?page=trx_create" class="space-y-5">
+          <form method="POST" action="?page=trx_create" class="space-y-5" id="form-danamon">
             <input type="hidden" name="trx_type" value="danamon">
+
+            <!-- Customer Selector -->
+            <div class="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-700">
+              <label class="block text-xs font-semibold text-indigo-700 dark:text-indigo-300 mb-1.5">
+                <svg class="w-3.5 h-3.5 inline mr-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                Pilih Customer (Auto-fill)
+              </label>
+              <select id="dan-customer-sel" class="w-full px-3 py-2.5 text-sm border border-indigo-300 dark:border-indigo-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                <option value="">— Pilih customer untuk auto-fill —</option>
+              </select>
+              <p class="text-[10px] text-indigo-500 mt-1">Pilih customer untuk otomatis mengisi Rekening Asal</p>
+            </div>
+
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Tipe Protokol <span class="text-red-500">*</span></label>
@@ -3609,8 +3737,13 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
               </div>
               <div>
                 <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Rekening Asal <span class="text-red-500">*</span></label>
-                <input type="text" name="source_account" required placeholder="cth: 003558900266"
-                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                <div class="relative">
+                  <select id="dan-src-sel" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 mb-1">
+                    <option value="">— Pilih rekening asal —</option>
+                  </select>
+                  <input type="text" name="source_account" id="dan-src-input" required placeholder="Ketik manual atau pilih di atas"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                </div>
               </div>
               <div>
                 <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Rekening Tujuan</label>
@@ -3644,8 +3777,21 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
 
           <?php elseif ($activeType === 'dwallet'): ?>
           <!-- ── D-Wallet Form ── -->
-          <form method="POST" action="?page=trx_create" class="space-y-5">
+          <form method="POST" action="?page=trx_create" class="space-y-5" id="form-dwallet">
             <input type="hidden" name="trx_type" value="dwallet">
+
+            <!-- Customer Selector -->
+            <div class="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-700">
+              <label class="block text-xs font-semibold text-blue-700 dark:text-blue-300 mb-1.5">
+                <svg class="w-3.5 h-3.5 inline mr-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                Pilih Customer (Auto-fill)
+              </label>
+              <select id="dw-customer-sel" class="w-full px-3 py-2.5 text-sm border border-blue-300 dark:border-blue-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                <option value="">— Pilih customer untuk auto-fill —</option>
+              </select>
+              <p id="dw-customer-info" class="text-[10px] text-blue-500 mt-1">Pilih customer untuk otomatis mengisi Kode Pengirim</p>
+            </div>
+
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Jenis Transaksi <span class="text-red-500">*</span></label>
@@ -3663,14 +3809,24 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
                   class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
               </div>
               <div>
-                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Pengirim</label>
-                <input type="text" name="kode_sender" placeholder="cth: A-000255"
-                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Pengirim (Sender)</label>
+                <div class="space-y-1">
+                  <select id="dw-sender-sel" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                    <option value="">— Pilih wallet pengirim —</option>
+                  </select>
+                  <input type="text" name="kode_sender" id="dw-sender-input" placeholder="cth: A-000255"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                </div>
               </div>
               <div>
-                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Penerima</label>
-                <input type="text" name="kode_receiver" placeholder="cth: A-000234"
-                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Penerima (Receiver)</label>
+                <div class="space-y-1">
+                  <select id="dw-receiver-sel" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+                    <option value="">— Pilih wallet penerima —</option>
+                  </select>
+                  <input type="text" name="kode_receiver" id="dw-receiver-input" placeholder="cth: A-000234"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                </div>
               </div>
               <div>
                 <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Biaya / Fee (Rp)</label>
@@ -3694,17 +3850,30 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
 
           <?php elseif ($activeType === 'qris'): ?>
           <!-- ── QRIS Form ── -->
-          <form method="POST" action="?page=trx_create" class="space-y-5">
+          <form method="POST" action="?page=trx_create" class="space-y-5" id="form-qris">
             <input type="hidden" name="trx_type" value="qris">
+
+            <!-- Merchant Selector -->
+            <div class="p-4 bg-orange-50 dark:bg-orange-900/20 rounded-lg border border-orange-200 dark:border-orange-700">
+              <label class="block text-xs font-semibold text-orange-700 dark:text-orange-300 mb-1.5">
+                <svg class="w-3.5 h-3.5 inline mr-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/></svg>
+                Pilih Merchant (Auto-fill)
+              </label>
+              <select id="qris-merchant-sel" class="w-full px-3 py-2.5 text-sm border border-orange-300 dark:border-orange-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500">
+                <option value="">— Pilih merchant untuk auto-fill —</option>
+              </select>
+              <p class="text-[10px] text-orange-500 mt-1">Pilih merchant untuk otomatis mengisi Merchant ID dan Terminal ID</p>
+            </div>
+
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
               <div>
                 <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Merchant ID <span class="text-red-500">*</span></label>
-                <input type="text" name="merchant_id" required placeholder="cth: MCHT001"
+                <input type="text" name="merchant_id" id="qris-merchant-id" required placeholder="cth: MCHT001"
                   class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
               </div>
               <div>
                 <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Terminal ID</label>
-                <input type="text" name="terminal_id" placeholder="cth: TRM001"
+                <input type="text" name="terminal_id" id="qris-terminal-id" placeholder="cth: TRM001"
                   class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
               </div>
               <div>
@@ -3740,13 +3909,25 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
           </form>
           <?php elseif ($activeType === 'pulsa'): ?>
           <!-- ── Penjualan Pulsa Form ── -->
-          <form method="POST" action="?page=trx_create" class="space-y-6">
+          <form method="POST" action="?page=trx_create" class="space-y-6" id="form-pulsa">
             <input type="hidden" name="trx_type" value="pulsa">
 
             <!-- Info Banner -->
             <div class="flex items-start gap-2 p-3 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-purple-700 dark:text-purple-300 text-xs">
               <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <span>Data akan disimpan ke tabel <strong>pulsa_penjualan_[tahun]</strong> sesuai Tanggal Transaksi. Status awal: <strong>P (Pending)</strong> menunggu persetujuan.</span>
+            </div>
+
+            <!-- Customer Selector (Pulsa) -->
+            <div class="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-700">
+              <label class="block text-xs font-semibold text-purple-700 dark:text-purple-300 mb-1.5">
+                <svg class="w-3.5 h-3.5 inline mr-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                Pilih Customer (Auto-fill)
+              </label>
+              <select id="pulsa-customer-sel" class="w-full px-3 py-2.5 text-sm border border-purple-300 dark:border-purple-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                <option value="">— Pilih customer untuk auto-fill —</option>
+              </select>
+              <div id="pulsa-customer-badge" class="hidden mt-2 p-2 rounded bg-purple-100 dark:bg-purple-800/30 text-xs text-purple-700 dark:text-purple-300"></div>
             </div>
 
             <!-- SEKSI 1: Info Dasar -->
@@ -3760,7 +3941,7 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Customer <span class="text-red-500">*</span></label>
-                  <input type="text" name="KodeCustomer" required placeholder="cth: A-000300"
+                  <input type="text" name="KodeCustomer" id="pulsa-kode-customer" required placeholder="cth: A-000300"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                 </div>
                 <div>
@@ -3796,7 +3977,7 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nomor HP Sender</label>
-                  <input type="text" name="HPSender" placeholder="Sama dengan HP Tujuan jika kosong"
+                  <input type="text" name="HPSender" id="pulsa-hp-sender" placeholder="Sama dengan HP Tujuan jika kosong"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                 </div>
                 <div>
@@ -3806,7 +3987,7 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Sender (Agent)</label>
-                  <input type="text" name="Sender" placeholder="cth: bpr_pas"
+                  <input type="text" name="Sender" id="pulsa-sender" placeholder="cth: bpr_pas"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                 </div>
               </div>
@@ -3933,6 +4114,255 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
         </a>
       </div>
     </div>
+
+    <!-- ═══ AUTO-FILL JAVASCRIPT ═══════════════════════════════════════ -->
+    <script>
+    (function(){
+      'use strict';
+
+      /* ── Helpers ─────────────────────────────────────────────────── */
+      function qs(sel){ return document.querySelector(sel); }
+      function fmtRp(n){ return 'Rp '+Number(n||0).toLocaleString('id-ID'); }
+
+      /* ── Searchable filter di atas <select> ─────────────────────── */
+      function makeSearchable(selectEl, placeholder){
+        if(!selectEl) return;
+        var search = document.createElement('input');
+        search.type = 'text';
+        search.placeholder = placeholder || 'Cari...';
+        search.className = 'w-full px-3 py-2 text-sm border border-slate-300 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-blue-500 mb-1';
+        selectEl.parentNode.insertBefore(search, selectEl);
+        search.addEventListener('input', function(){
+          var q = this.value.toLowerCase();
+          Array.from(selectEl.options).forEach(function(opt){
+            if(opt.value === ''){ opt.hidden = false; return; }
+            opt.hidden = !opt.text.toLowerCase().includes(q);
+          });
+        });
+      }
+
+      /* ── API JSON helper ─────────────────────────────────────────── */
+      function apiGet(action, params, cb){
+        var qstr = Object.keys(params||{}).map(function(k){
+          return encodeURIComponent(k)+'='+encodeURIComponent(params[k]);
+        }).join('&');
+        fetch('?page=api_json&action='+action+(qstr?'&'+qstr:''), {
+          headers: {'X-Requested-With':'XMLHttpRequest'}
+        })
+        .then(function(r){ return r.json(); })
+        .then(function(d){ if(d.success) cb(d.data); else console.warn('[api_json] '+action+':', d.message); })
+        .catch(function(e){ console.error('[api_json] fetch error:', e); });
+      }
+
+      /* ── Isi select dengan opsi ──────────────────────────────────── */
+      function fillSelect(sel, items, valFn, txtFn, emptyTxt){
+        if(!sel) return;
+        var cur = sel.value;
+        sel.innerHTML = '<option value="">'+emptyTxt+'</option>';
+        (items||[]).forEach(function(item){
+          var opt = document.createElement('option');
+          opt.value = valFn(item);
+          opt.textContent = txtFn(item);
+          sel.appendChild(opt);
+        });
+        if(cur) sel.value = cur;
+      }
+
+      /* ════════════════════════════════════════════════════════════
+         TAB DANAMON
+         ════════════════════════════════════════════════════════════ */
+      var danCustSel  = qs('#dan-customer-sel');
+      var danSrcSel   = qs('#dan-src-sel');
+      var danSrcInput = qs('#dan-src-input');
+
+      if(danCustSel){
+        apiGet('customers', {}, function(data){
+          fillSelect(danCustSel, data,
+            function(c){ return c.id; },
+            function(c){ return c.name + (c.KodePro ? ' ['+c.KodePro+']' : ''); },
+            '— Pilih customer —'
+          );
+          makeSearchable(danCustSel, 'Cari customer...');
+        });
+        /* Danamon tidak punya FK customer di tabel — tapi kita bisa log info */
+        danCustSel.addEventListener('change', function(){
+          /* optional: tampilkan info customer di console */
+        });
+      }
+
+      if(danSrcSel && danSrcInput){
+        apiGet('danamon_accounts', {}, function(data){
+          fillSelect(danSrcSel, data,
+            function(a){ return a; },
+            function(a){ return a; },
+            '— Pilih rekening asal —'
+          );
+          makeSearchable(danSrcSel, 'Cari nomor rekening...');
+        });
+        danSrcSel.addEventListener('change', function(){
+          if(this.value) danSrcInput.value = this.value;
+        });
+        danSrcInput.addEventListener('input', function(){
+          if(danSrcSel.value !== this.value) danSrcSel.value = '';
+        });
+      }
+
+      /* ════════════════════════════════════════════════════════════
+         TAB D-WALLET
+         ════════════════════════════════════════════════════════════ */
+      var dwCustSel       = qs('#dw-customer-sel');
+      var dwSenderSel     = qs('#dw-sender-sel');
+      var dwSenderInput   = qs('#dw-sender-input');
+      var dwReceiverSel   = qs('#dw-receiver-sel');
+      var dwReceiverInput = qs('#dw-receiver-input');
+      var dwCustInfo      = qs('#dw-customer-info');
+
+      if(dwCustSel){
+        apiGet('customers', {}, function(data){
+          fillSelect(dwCustSel, data,
+            function(c){ return c.id; },
+            function(c){ return c.name + (c.KodePro ? ' ['+c.KodePro+']' : ''); },
+            '— Pilih customer —'
+          );
+          makeSearchable(dwCustSel, 'Cari customer...');
+        });
+
+        dwCustSel.addEventListener('change', function(){
+          var id = this.value;
+          if(!id){
+            if(dwCustInfo) dwCustInfo.textContent = 'Pilih customer untuk otomatis mengisi Kode Pengirim';
+            return;
+          }
+          apiGet('customer_detail', {id: id}, function(c){
+            if(dwSenderInput && c.KodePro){
+              dwSenderInput.value = c.KodePro;
+              if(dwSenderSel) dwSenderSel.value = c.KodePro;
+            }
+            if(dwCustInfo) dwCustInfo.innerHTML =
+              '<strong>'+c.name+'</strong>'
+              +' &nbsp;·&nbsp; KodePro: <code>'+c.KodePro+'</code>'
+              +' &nbsp;·&nbsp; Sender: <code>'+(c.user_h2h||'—')+'</code>';
+          });
+        });
+      }
+
+      if(dwSenderSel || dwReceiverSel){
+        apiGet('dwallet_wallets', {}, function(data){
+          var fmt = function(w){
+            return (w.customer_name || w.customer_code)
+              + ' ['+w.customer_code+'] – Rek: '+w.account_number
+              + ' ('+fmtRp(w.balance)+')';
+          };
+          fillSelect(dwSenderSel, data,
+            function(w){ return w.customer_code; }, fmt,
+            '— Pilih wallet pengirim —'
+          );
+          fillSelect(dwReceiverSel, data,
+            function(w){ return w.customer_code; }, fmt,
+            '— Pilih wallet penerima —'
+          );
+          makeSearchable(dwSenderSel,   'Cari wallet pengirim...');
+          makeSearchable(dwReceiverSel, 'Cari wallet penerima...');
+        });
+
+        if(dwSenderSel && dwSenderInput){
+          dwSenderSel.addEventListener('change', function(){
+            if(this.value) dwSenderInput.value = this.value;
+          });
+          dwSenderInput.addEventListener('input', function(){
+            if(dwSenderSel.value !== this.value) dwSenderSel.value = '';
+          });
+        }
+        if(dwReceiverSel && dwReceiverInput){
+          dwReceiverSel.addEventListener('change', function(){
+            if(this.value) dwReceiverInput.value = this.value;
+          });
+          dwReceiverInput.addEventListener('input', function(){
+            if(dwReceiverSel.value !== this.value) dwReceiverSel.value = '';
+          });
+        }
+      }
+
+      /* ════════════════════════════════════════════════════════════
+         TAB QRIS
+         ════════════════════════════════════════════════════════════ */
+      var qrisMerchantSel = qs('#qris-merchant-sel');
+      var qrisMerchantId  = qs('#qris-merchant-id');
+      var qrisTerminalId  = qs('#qris-terminal-id');
+
+      if(qrisMerchantSel){
+        apiGet('qris_merchants', {}, function(data){
+          fillSelect(qrisMerchantSel, data,
+            function(m){ return JSON.stringify(m); },
+            function(m){ return m.merchant_id + (m.terminal_id ? '  (terminal: '+m.terminal_id+')' : ''); },
+            '— Pilih merchant —'
+          );
+          makeSearchable(qrisMerchantSel, 'Cari merchant ID...');
+        });
+
+        qrisMerchantSel.addEventListener('change', function(){
+          if(!this.value) return;
+          try {
+            var m = JSON.parse(this.value);
+            if(qrisMerchantId)             qrisMerchantId.value = m.merchant_id || '';
+            if(qrisTerminalId && m.terminal_id) qrisTerminalId.value  = m.terminal_id;
+          } catch(e){}
+        });
+      }
+
+      /* ════════════════════════════════════════════════════════════
+         TAB PULSA
+         ════════════════════════════════════════════════════════════ */
+      var pulsaCustSel  = qs('#pulsa-customer-sel');
+      var pulsaKodeCust = qs('#pulsa-kode-customer');
+      var pulsaSender   = qs('#pulsa-sender');
+      var pulsaHpSender = qs('#pulsa-hp-sender');
+      var pulsaBadge    = qs('#pulsa-customer-badge');
+
+      if(pulsaCustSel){
+        apiGet('customers', {}, function(data){
+          fillSelect(pulsaCustSel, data,
+            function(c){ return c.id; },
+            function(c){
+              return c.name
+                + (c.KodePro  ? ' ['+c.KodePro+']'   : '')
+                + (c.user_h2h ? ' – '+c.user_h2h      : '');
+            },
+            '— Pilih customer —'
+          );
+          makeSearchable(pulsaCustSel, 'Cari nama / kode customer...');
+        });
+
+        pulsaCustSel.addEventListener('change', function(){
+          var id = this.value;
+          if(!id){
+            if(pulsaBadge){ pulsaBadge.classList.add('hidden'); pulsaBadge.innerHTML=''; }
+            return;
+          }
+          apiGet('customer_detail', {id: id}, function(c){
+            /* KodeCustomer ← KodePro */
+            if(pulsaKodeCust) pulsaKodeCust.value = c.KodePro  || '';
+            /* Sender       ← user_h2h */
+            if(pulsaSender)   pulsaSender.value   = c.user_h2h || '';
+            /* HPSender     ← phone */
+            if(pulsaHpSender && c.phone) pulsaHpSender.value = c.phone;
+
+            /* Tampilkan badge konfirmasi */
+            if(pulsaBadge){
+              pulsaBadge.classList.remove('hidden');
+              pulsaBadge.innerHTML =
+                '✅ <strong>'+c.name+'</strong>'
+                +' &nbsp;|&nbsp; KodePro: <code>'+c.KodePro+'</code>'
+                +' &nbsp;|&nbsp; Sender: <code>'+(c.user_h2h||'—')+'</code>'
+                +' &nbsp;|&nbsp; HP: <code>'+(c.phone||'—')+'</code>'
+                +(c.TipeAkun ? ' &nbsp;|&nbsp; Tipe: '+c.TipeAkun : '');
+            }
+          });
+        });
+      }
+
+    })();
+    </script>
     <?php
 }
 
