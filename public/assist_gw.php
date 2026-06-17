@@ -989,15 +989,8 @@ function handleTrxPulsa(): void {
     $limit   = 20;
     $offset  = ($page_n - 1) * $limit;
 
-    // Use current year's table (pulsa_penjualan_2025 or fallback to main)
-    $year    = (int)date('Y');
-    $tbl     = "pulsa_penjualan_{$year}";
-    // Check if year table exists, fallback to pulsa_penjualan
-    try {
-        DB::get()->query("SELECT 1 FROM `{$tbl}` LIMIT 1");
-    } catch (\PDOException $e) {
-        $tbl = 'pulsa_penjualan';
-    }
+    // Gunakan tabel utama pulsa_penjualan (tanpa partisi tahun)
+    $tbl = 'pulsa_penjualan';
 
     $where  = ['1=1'];
     $params = [];
