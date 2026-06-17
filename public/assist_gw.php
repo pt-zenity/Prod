@@ -639,8 +639,25 @@ function handleScheduler(): void {
 }
 
 // ── SECURITY KEYS ────────────────────────────────────────────────────
+// Tabel `security_keys` production dipakai modul lain (kolom berbeda).
+// App ini memakai tabel `assist_security_keys` khusus RSA Key Manager.
+function ensureAssistSecurityKeysTable(): void {
+    DB::get()->exec("CREATE TABLE IF NOT EXISTS `assist_security_keys` (
+        `id`          int unsigned    NOT NULL AUTO_INCREMENT,
+        `identifier`  varchar(100)    NOT NULL,
+        `description` text            DEFAULT NULL,
+        `public_key`  text            NOT NULL,
+        `private_key` text            NOT NULL,
+        `created_at`  int unsigned    NOT NULL DEFAULT '0',
+        PRIMARY KEY (`id`),
+        UNIQUE KEY `uq_identifier` (`identifier`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+}
+
 function handleSecurityKeys(): void {
     if (!isAdmin()) { flash('error', 'Akses ditolak'); redirect('?page=home'); }
+
+    ensureAssistSecurityKeysTable(); // buat tabel jika belum ada
 
     $action = $_GET['action'] ?? 'list';
     $method = $_SERVER['REQUEST_METHOD'];
@@ -648,7 +665,7 @@ function handleSecurityKeys(): void {
     if ($action === 'generate' && $method === 'POST') {
         $identifier  = trim($_POST['identifier'] ?? 'key_' . time());
         $description = trim($_POST['description'] ?? '');
-        
+
         // Generate RSA key pair
         $config = ['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA];
         $res = openssl_pkey_new($config);
@@ -656,7 +673,7 @@ function handleSecurityKeys(): void {
             openssl_pkey_export($res, $privateKey);
             $pubKeyDetails = openssl_pkey_get_details($res);
             $publicKey = $pubKeyDetails['key'];
-            DB::exec("REPLACE INTO security_keys (identifier,description,public_key,private_key,created_at) VALUES (?,?,?,?,?)",
+            DB::exec("REPLACE INTO `assist_security_keys` (identifier,description,public_key,private_key,created_at) VALUES (?,?,?,?,?)",
                 [$identifier, $description, $publicKey, $privateKey, time()]);
             logActivity('KEY_GENERATED', ['identifier' => $identifier]);
             flash('success', "RSA Key '{$identifier}' berhasil dibuat.");
@@ -667,13 +684,13 @@ function handleSecurityKeys(): void {
     }
 
     if ($action === 'delete' && isset($_GET['id'])) {
-        DB::exec("DELETE FROM security_keys WHERE id=?", [(int)$_GET['id']]);
+        DB::exec("DELETE FROM `assist_security_keys` WHERE id=?", [(int)$_GET['id']]);
         flash('success', 'Key dihapus.');
         redirect('?page=security_keys');
     }
 
     if ($action === 'download' && isset($_GET['id'])) {
-        $key  = DB::row("SELECT * FROM security_keys WHERE id=?", [(int)$_GET['id']]);
+        $key  = DB::row("SELECT * FROM `assist_security_keys` WHERE id=?", [(int)$_GET['id']]);
         $type = $_GET['type'] ?? 'public';
         if ($key) {
             header('Content-Type: text/plain');
@@ -683,7 +700,7 @@ function handleSecurityKeys(): void {
         }
     }
 
-    $keys = DB::query("SELECT id,identifier,description,created_at,SUBSTR(public_key,1,60) as public_key_preview FROM security_keys ORDER BY id DESC");
+    $keys = DB::query("SELECT id,identifier,description,created_at,SUBSTR(public_key,1,60) as public_key_preview FROM `assist_security_keys` ORDER BY id DESC");
     renderLayout('RSA Key Manager', fn() => renderSecurityKeysPage($keys));
 }
 
@@ -1805,7 +1822,7 @@ function renderMessageStats(): void {
             <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
               <td class="px-4 py-3 text-xs text-slate-400 font-mono whitespace-nowrap"><?= formatDate((int)$m['created_at']) ?></td>
               <td class="px-4 py-3 text-slate-800 dark:text-slate-200"><?= h($m['customer_name'] ?? '—') ?></td>
-              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($m['template_code']) ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($m['template_name'] ?? '—') ?></td>
               <td class="px-4 py-3 text-slate-500"><?= h(ucfirst($m['protocol'])) ?></td>
               <td class="px-4 py-3 text-slate-600 dark:text-slate-300 max-w-xs truncate"><?= h($m['recipient']) ?></td>
               <td class="px-4 py-3">
