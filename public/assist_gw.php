@@ -193,6 +193,19 @@ function isAjax(): bool {
 // ─── ROUTING ────────────────────────────────────────────────────────
 checkDbConnection(); // Verifikasi koneksi MySQL — tidak install tabel
 
+// ─── AUTO-MIGRATE: kolom baru yang ditambahkan ───────────────────────
+// Tambahkan kolom transporter_url ke danamon_configs jika belum ada
+// (aman dijalankan berkali-kali — diabaikan jika kolom sudah ada)
+try {
+    $cols = array_column(
+        DB::query("SHOW COLUMNS FROM `danamon_configs` LIKE 'transporter_url'"),
+        'Field'
+    );
+    if (empty($cols)) {
+        DB::exec("ALTER TABLE `danamon_configs` ADD COLUMN `transporter_url` varchar(255) DEFAULT NULL COMMENT 'URL endpoint Transporter internal (cURL target)' AFTER `base_url`");
+    }
+} catch (Throwable) { /* tabel belum ada atau tidak perlu migrate */ }
+
 $page   = $_GET['page']   ?? 'home';
 $action = $_GET['action'] ?? '';
 $method = $_SERVER['REQUEST_METHOD'];
@@ -1561,30 +1574,31 @@ function handleDanamonConfigs(): void {
 
     // ── Edit / Tambah ──
     if ($method === 'POST' && in_array($action, ['add','edit'])) {
-        $id          = (int)($_POST['id']           ?? 0);
-        $name        = trim($_POST['name']           ?? '');
-        $baseUrl     = trim($_POST['base_url']       ?? '');
-        $partnerId   = trim($_POST['partner_id']     ?? '');
-        $channelId   = trim($_POST['channel_id']     ?? '');
-        $clientId    = trim($_POST['client_id']      ?? '');
-        $clientSec   = trim($_POST['client_secret']  ?? '');
-        $isActive    = (int)($_POST['is_active']     ?? 1);
+        $id             = (int)($_POST['id']              ?? 0);
+        $name           = trim($_POST['name']              ?? '');
+        $transporterUrl = trim($_POST['transporter_url']   ?? '');
+        $baseUrl        = trim($_POST['base_url']          ?? '');
+        $partnerId      = trim($_POST['partner_id']        ?? '');
+        $channelId      = trim($_POST['channel_id']        ?? '');
+        $clientId       = trim($_POST['client_id']         ?? '');
+        $clientSec      = trim($_POST['client_secret']     ?? '');
+        $isActive       = (int)($_POST['is_active']        ?? 1);
 
-        if (!$name || !$baseUrl || !$partnerId) {
-            flash('error', 'Nama, Base URL, dan Partner ID wajib diisi.');
+        if (!$name || !$transporterUrl || !$partnerId) {
+            flash('error', 'Nama, Transporter URL, dan Partner ID wajib diisi.');
             redirect("?page=danamon_configs&action={$action}" . ($id ? "&id={$id}" : ''));
             return;
         }
 
         if ($action === 'add') {
             DB::exec(
-                "INSERT INTO `danamon_configs` (`name`,`base_url`,`partner_id`,`channel_id`,`client_id`,`client_secret`,`is_active`) VALUES (?,?,?,?,?,?,?)",
-                [$name, $baseUrl, $partnerId, $channelId, $clientId, $clientSec, $isActive]
+                "INSERT INTO `danamon_configs` (`name`,`transporter_url`,`base_url`,`partner_id`,`channel_id`,`client_id`,`client_secret`,`is_active`) VALUES (?,?,?,?,?,?,?,?)",
+                [$name, $transporterUrl, $baseUrl, $partnerId, $channelId, $clientId, $clientSec, $isActive]
             );
             flash('success', "Config '{$name}' berhasil ditambahkan.");
         } else {
-            $sets = "`name`=?,`base_url`=?,`partner_id`=?,`channel_id`=?,`is_active`=?";
-            $params = [$name, $baseUrl, $partnerId, $channelId, $isActive];
+            $sets   = "`name`=?,`transporter_url`=?,`base_url`=?,`partner_id`=?,`channel_id`=?,`is_active`=?";
+            $params = [$name, $transporterUrl, $baseUrl, $partnerId, $channelId, $isActive];
             if ($clientSec !== '') { $sets .= ",`client_secret`=?"; $params[] = $clientSec; }
             if ($clientId  !== '') { $sets .= ",`client_id`=?";     $params[] = $clientId; }
             $params[] = $id;
@@ -1597,7 +1611,7 @@ function handleDanamonConfigs(): void {
 
     $configs = [];
     try {
-        $configs = DB::query("SELECT id,name,base_url,partner_id,channel_id,client_id,is_active,created_at FROM `danamon_configs` ORDER BY id ASC");
+        $configs = DB::query("SELECT id,name,transporter_url,base_url,partner_id,channel_id,client_id,is_active,created_at FROM `danamon_configs` ORDER BY id ASC");
     } catch (Throwable) {}
 
     $editItem = null;
@@ -1636,8 +1650,19 @@ function renderDanamonConfigsPage(array $configs, ?array $editItem, string $acti
         class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
     </div>
     <div>
-      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">Base URL Transporter <span class="text-red-400">*</span></label>
-      <input type="text" name="base_url" value="<?= h($editItem['base_url'] ?? '') ?>" placeholder="http://10.2.3.117:8099/transporter/transaksi"
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
+        Transporter URL <span class="text-red-400">*</span>
+        <span class="font-normal text-slate-400">(endpoint cURL ke Transporter internal)</span>
+      </label>
+      <input type="text" name="transporter_url" value="<?= h($editItem['transporter_url'] ?? $editItem['base_url'] ?? '') ?>" placeholder="http://10.2.3.117:8099/transporter/transaksi"
+        class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
+    </div>
+    <div class="sm:col-span-2">
+      <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1">
+        Base URL Danamon API
+        <span class="font-normal text-slate-400">(diteruskan Transporter ke Danamon — kosongkan jika sama dengan Transporter URL)</span>
+      </label>
+      <input type="text" name="base_url" value="<?= h($editItem['base_url'] ?? '') ?>" placeholder="https://api.danamon.co.id (atau biarkan kosong)"
         class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500">
     </div>
     <div>
@@ -1680,7 +1705,7 @@ function renderDanamonConfigsPage(array $configs, ?array $editItem, string $acti
         <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
           <th class="px-4 py-3 text-left">ID</th>
           <th class="px-4 py-3 text-left">Nama</th>
-          <th class="px-4 py-3 text-left">Base URL</th>
+          <th class="px-4 py-3 text-left">Transporter URL</th>
           <th class="px-4 py-3 text-left">Partner ID</th>
           <th class="px-4 py-3 text-left">Channel</th>
           <th class="px-4 py-3 text-center">Status</th>
@@ -1694,7 +1719,7 @@ function renderDanamonConfigsPage(array $configs, ?array $editItem, string $acti
         <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
           <td class="px-4 py-3 font-mono text-xs text-slate-400"><?= (int)$c['id'] ?></td>
           <td class="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200"><?= h($c['name']) ?></td>
-          <td class="px-4 py-3 font-mono text-xs text-slate-500 max-w-[200px] truncate" title="<?= h($c['base_url']) ?>"><?= h($c['base_url']) ?></td>
+          <td class="px-4 py-3 font-mono text-xs text-slate-500 max-w-[220px] truncate" title="<?= h($c['transporter_url'] ?? $c['base_url'] ?? '') ?>"><?= h($c['transporter_url'] ?? $c['base_url'] ?? '—') ?></td>
           <td class="px-4 py-3 font-mono text-xs text-slate-500 max-w-[160px] truncate" title="<?= h($c['partner_id']) ?>"><?= h(substr($c['partner_id'],0,20)).'...' ?></td>
           <td class="px-4 py-3 font-mono text-xs text-slate-500"><?= h($c['channel_id']) ?></td>
           <td class="px-4 py-3 text-center">
@@ -1765,11 +1790,14 @@ function getActiveDanamonConfig(?int $configId = null): ?array {
  * Return: ['success'=>bool, 'response'=>array, 'http_code'=>int, 'raw'=>string]
  */
 function snapCallTransporter(array $cfg, array $trxOrder, string $protocol = 'bifast'): array {
-    $baseUrl      = rtrim($cfg['base_url'] ?? '', '/');
-    $partnerId    = $cfg['partner_id']    ?? '';
-    $channelId    = $cfg['channel_id']    ?? '';
-    $clientSecret = $cfg['client_secret'] ?? '';
-    $clientId     = $cfg['client_id']     ?? '';
+    // transporter_url  = endpoint cURL ke Transporter internal (http://10.2.3.117:8099/...)
+    // base_url         = Danamon API base URL yang diteruskan Transporter ke Danamon
+    $transporterUrl = rtrim($cfg['transporter_url'] ?? $cfg['base_url'] ?? '', '/');
+    $baseUrl        = rtrim($cfg['base_url']         ?? '', '/');
+    $partnerId      = $cfg['partner_id']    ?? '';
+    $channelId      = $cfg['channel_id']    ?? '';
+    $clientSecret   = $cfg['client_secret'] ?? '';
+    $clientId       = $cfg['client_id']     ?? '';
 
     // Signature: sha256(partner_id + channel_id + client_secret)
     $signature = hash('sha256', $partnerId . $channelId . $clientSecret);
@@ -1780,7 +1808,7 @@ function snapCallTransporter(array $cfg, array $trxOrder, string $protocol = 'bi
         'signature'  => $signature,
         'event_data' => [
             'config' => [
-                'base_url'      => $baseUrl,
+                'base_url'      => $baseUrl,       // Danamon API URL — diteruskan Transporter ke Danamon
                 'channel_id'    => $channelId,
                 'partner_id'    => $partnerId,
                 'client_secret' => $clientSecret,
@@ -1792,7 +1820,7 @@ function snapCallTransporter(array $cfg, array $trxOrder, string $protocol = 'bi
         ],
     ], JSON_UNESCAPED_UNICODE);
 
-    $ch = curl_init($baseUrl);
+    $ch = curl_init($transporterUrl);  // POST ke Transporter internal
     curl_setopt_array($ch, [
         CURLOPT_POST           => true,
         CURLOPT_POSTFIELDS     => $payload,
