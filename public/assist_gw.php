@@ -1190,24 +1190,22 @@ function handleApiJson(): void {
                     }
                 } catch (Throwable $e) { /* tabel stock mungkin kosong */ }
 
-                // Selalu ambil dari history pulsa_penjualan (multi-tahun) untuk JenisTrx yg valid
+                // Ambil dari tabel utama pulsa_penjualan (tanpa tahun)
                 $historyProducts = [];
-                $years = [(int)date('Y'), (int)date('Y')-1, (int)date('Y')-2];
-                foreach ($years as $yr) {
-                    $tbl2 = "pulsa_penjualan_{$yr}";
-                    try {
-                        $hRows = DB::query(
-                            "SELECT Kode, JenisTrx,
-                                    MAX(HB) AS HB, MAX(HJ) AS HJ, MAX(HJ_Nasabah) AS HJ_Nasabah,
-                                    COUNT(*) AS cnt
-                             FROM `{$tbl2}`
-                             WHERE Kode IS NOT NULL AND Kode <> ''
-                             GROUP BY Kode, JenisTrx
-                             ORDER BY Kode ASC
-                             LIMIT 300",
-                            []
-                        );
-                        foreach ($hRows as $h) {
+                try {
+                    $tbl2 = 'pulsa_penjualan';
+                    $hRows = DB::query(
+                        "SELECT Kode, JenisTrx,
+                                MAX(HB) AS HB, MAX(HJ) AS HJ, MAX(HJ_Nasabah) AS HJ_Nasabah,
+                                COUNT(*) AS cnt
+                         FROM `{$tbl2}`
+                         WHERE Kode IS NOT NULL AND Kode <> ''
+                         GROUP BY Kode, JenisTrx
+                         ORDER BY cnt DESC
+                         LIMIT 300",
+                        []
+                    );
+                    foreach ($hRows as $h) {
                             $key = $h['Kode'].'|'.$h['JenisTrx'];
                             if (!isset($historyProducts[$key])) {
                                 $historyProducts[$key] = [
@@ -1227,8 +1225,7 @@ function handleApiJson(): void {
                                 $historyProducts[$key]['cnt'] += (int)($h['cnt'] ?? 0);
                             }
                         }
-                    } catch (Throwable $e) { /* tabel tahun ini mungkin belum ada */ }
-                }
+                } catch (Throwable $e) { /* tabel mungkin kosong */ }
 
                 // Merge: history products enriched dengan nama dari stock
                 $stockMap = [];
@@ -1337,7 +1334,7 @@ function handleTrxCreate(): void {
                         [$faktur, $refNo ?: $faktur, 'danamon', $protocol, $srcAcc, $dstAcc ?: null, $amount, 'PENDING', $payload, $ts, $ts]
                     );
                     $success = "Transaksi Bank berhasil dibuat dengan faktur <strong>{$faktur}</strong>, status PENDING menunggu persetujuan.";
-                    logActivity('trx_create', "Buat danamon_transactions faktur={$faktur} protocol={$protocol}");
+                    logActivity('trx_create', ['table'=>'danamon_transactions','faktur'=>$faktur,'protocol'=>$protocol]);
                     break;
 
                 // ── D-Wallet ───────────────────────────────────────────
@@ -1362,7 +1359,7 @@ function handleTrxCreate(): void {
                         [$faktur, $jenis, $sender ?: null, $receiver ?: null, $amount, $fee, $gross, $keterangan ?: null, 'P', $nowDt, $nowDt]
                     );
                     $success = "Transaksi D-Wallet berhasil dibuat dengan faktur <strong>{$faktur}</strong>, status PENDING menunggu persetujuan.";
-                    logActivity('trx_create', "Buat dwallet_transactions faktur={$faktur} jenis={$jenis}");
+                    logActivity('trx_create', ['table'=>'dwallet_transactions','faktur'=>$faktur,'jenis'=>$jenis]);
                     break;
 
                 // ── QRIS ───────────────────────────────────────────────
@@ -1387,7 +1384,7 @@ function handleTrxCreate(): void {
                         [$extId, $refNo, $refNo, $merchantId, $terminalId ?: null, $amount, $currency, $nowDt, 'PENDING', $nowDt]
                     );
                     $success = "Transaksi QRIS berhasil dibuat, status PENDING menunggu persetujuan.";
-                    logActivity('trx_create', "Buat qris_transactions ext_id={$extId} merchant={$merchantId}");
+                    logActivity('trx_create', ['table'=>'qris_transactions','external_id'=>$extId,'merchant_id'=>$merchantId]);
                     break;
 
                 // ── Penjualan Pulsa ────────────────────────────────────
@@ -1421,9 +1418,8 @@ function handleTrxCreate(): void {
                     if (!$kodeCustomer) throw new RuntimeException('Kode Customer wajib diisi.');
                     if ($hjNasabah <= 0) throw new RuntimeException('HJ Nasabah (Harga Jual ke Pelanggan) harus lebih dari 0.');
 
-                    // Tentukan tabel pulsa berdasarkan tahun tanggal transaksi
-                    $tahun = substr($tgl, 0, 4);
-                    $tblPulsa = "pulsa_penjualan_{$tahun}";
+                    // Gunakan tabel utama pulsa_penjualan (tanpa tahun)
+                    $tblPulsa = 'pulsa_penjualan';
                     $nowTs = time();
 
                     // Auto-generate Nomor jika kosong: format mirip SL0xxxxx
@@ -1480,7 +1476,7 @@ function handleTrxCreate(): void {
                         ]
                     );
                     $success = "Penjualan Pulsa berhasil dibuat di tabel <strong>{$tblPulsa}</strong>, nomor <strong>{$nomor}</strong>, status PENDING menunggu persetujuan.";
-                    logActivity('trx_create', "Buat {$tblPulsa} nomor={$nomor} kode={$kode} hp={$hp}");
+                    logActivity('trx_create', ['table'=>$tblPulsa,'nomor'=>$nomor,'kode'=>$kode,'hp'=>$hp]);
                     break;
 
                 default:
@@ -1521,7 +1517,7 @@ function handleTrxApprove(): void {
         ];
 
         // Untuk tabel pulsa_penjualan_*
-        if (preg_match('/^pulsa_penjualan_(\d{4})$/', $table)) {
+        if (preg_match('/^pulsa_penjualan(_\d{4})?$/', $table)) {
             $allowedTables[$table] = ['pk'=>'ID', 'status_col'=>'Status', 'approve'=>'S', 'reject'=>'G', 'ts_col'=>'DateTimeClose', 'ts_type'=>'unix'];
         }
 
@@ -1549,7 +1545,7 @@ function handleTrxApprove(): void {
                     } catch (PDOException) {}
                 }
                 setFlash('success', "{$count} transaksi berhasil disetujui secara massal.");
-                logActivity('trx_approve', "Bulk approve {$table}: {$count} transaksi");
+                logActivity('trx_approve', ['action'=>'bulk_approve','table'=>$table,'count'=>$count]);
                 redirect("?page={$back}");
                 return;
             }
@@ -1594,7 +1590,7 @@ function handleTrxApprove(): void {
             DB::exec($sql, $params);
             $label = $action === 'approve' ? 'disetujui' : 'ditolak';
             setFlash('success', "Transaksi #{$id} berhasil {$label}.");
-            logActivity('trx_approve', "Transaksi {$table}#{$id} {$label} → status={$newStatus}");
+            logActivity('trx_approve', ['table'=>$table,'id'=>$id,'action'=>$label,'new_status'=>$newStatus]);
         } catch (PDOException $e) {
             setFlash('error', 'Gagal update: ' . $e->getMessage());
         }
@@ -1618,22 +1614,19 @@ function handleTrxApprove(): void {
          FROM qris_transactions WHERE status IN ('PENDING','P','pending') ORDER BY id DESC LIMIT 50"
     );
 
-    // Pulsa: cari tabel tahun ini dan tahun lalu
+    // Pulsa: gunakan tabel utama pulsa_penjualan
     $pulsaPending = [];
-    $years = [date('Y'), date('Y') - 1];
-    foreach ($years as $yr) {
-        $tbl = "pulsa_penjualan_{$yr}";
-        try {
-            $rows = DB::query(
-                "SELECT ID AS trx_id, Nomor AS faktur, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$tbl}' AS _table
-                 FROM `{$tbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 30"
-            );
-            foreach ($rows as $r) {
-                $r['_table'] = $tbl;
-                $pulsaPending[] = $r;
-            }
-        } catch (PDOException) {}
-    }
+    try {
+        $tbl = 'pulsa_penjualan';
+        $rows = DB::query(
+            "SELECT ID AS trx_id, Nomor AS faktur, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$tbl}' AS _table
+             FROM `{$tbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 30"
+        );
+        foreach ($rows as $r) {
+            $r['_table'] = $tbl;
+            $pulsaPending[] = $r;
+        }
+    } catch (PDOException $e) {}
 
     $totalPending = count($pendingDanamon) + count($pendingDwallet) + count($pendingQris) + count($pulsaPending);
 
@@ -4021,7 +4014,7 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
             <!-- Info Banner -->
             <div class="flex items-start gap-2 p-3 rounded-lg bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-700 text-purple-700 dark:text-purple-300 text-xs">
               <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-              <span>Data akan disimpan ke tabel <strong>pulsa_penjualan_[tahun]</strong> sesuai Tanggal Transaksi. Status awal: <strong>P (Pending)</strong> menunggu persetujuan.</span>
+              <span>Data akan disimpan ke tabel <strong>pulsa_penjualan</strong>. Status awal: <strong>P (Pending)</strong> menunggu persetujuan.</span>
             </div>
 
             <!-- Customer Selector (Pulsa) -->
