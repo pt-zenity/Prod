@@ -279,6 +279,18 @@ switch ($page) {
     case 'message_stats':
         renderMessageStats(); break;
 
+    case 'trx_danamon':
+        handleTrxDanamon(); break;
+
+    case 'trx_dwallet':
+        handleTrxDwallet(); break;
+
+    case 'trx_pulsa':
+        handleTrxPulsa(); break;
+
+    case 'trx_qris':
+        handleTrxQris(); break;
+
     case 'scheduler':
         handleScheduler(); break;
 
@@ -799,6 +811,259 @@ function handleRoles(): void {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// TRANSAKSI HANDLERS
+// ══════════════════════════════════════════════════════════════════════
+
+// ─── HELPER: format rupiah ───────────────────────────────────────────
+function rupiah(mixed $n, bool $compact = false): string {
+    $n = (float)$n;
+    if ($compact && abs($n) >= 1_000_000_000) return 'Rp ' . number_format($n / 1_000_000_000, 1) . 'M';
+    if ($compact && abs($n) >= 1_000_000)     return 'Rp ' . number_format($n / 1_000_000, 1) . 'Jt';
+    return 'Rp ' . number_format($n, 0, ',', '.');
+}
+
+// ─── HELPER: status badge ───────────────────────────────────────────
+function statusBadge(string $status, array $map = []): string {
+    $default = [
+        'SUCCESS' => 'green', 'success' => 'green', 'S' => 'green',
+        'PENDING' => 'amber', 'pending' => 'amber', 'P' => 'amber',
+        'FAILED'  => 'red',   'failed'  => 'red',   'G' => 'red',
+        'PROCESSED'=> 'blue', 'processed'=> 'blue',
+        'active'  => 'green', 'inactive'=> 'slate',
+        'sent'    => 'green', 'queued'  => 'amber',
+    ];
+    $colorMap = array_merge($default, $map);
+    $color = $colorMap[$status] ?? 'slate';
+    $label = htmlspecialchars($status, ENT_QUOTES);
+    return "<span class=\"px-2 py-0.5 text-xs font-semibold rounded-full bg-{$color}-100 text-{$color}-700 dark:bg-{$color}-900/30 dark:text-{$color}-300\">{$label}</span>";
+}
+
+// ── TRANSAKSI BANK (danamon_transactions) ────────────────────────────
+function handleTrxDanamon(): void {
+    requireLogin();
+
+    $page_n  = max(1, (int)($_GET['p']      ?? 1));
+    $search  = trim($_GET['search']          ?? '');
+    $status  = trim($_GET['status']          ?? '');
+    $proto   = trim($_GET['protocol']        ?? '');
+    $dateFrom= trim($_GET['date_from']       ?? '');
+    $dateTo  = trim($_GET['date_to']         ?? '');
+    $limit   = 20;
+    $offset  = ($page_n - 1) * $limit;
+
+    $where  = ['1=1'];
+    $params = [];
+
+    if ($search) {
+        $where[]  = '(faktur LIKE ? OR ref_no LIKE ? OR source_account LIKE ? OR destination_account LIKE ?)';
+        $params   = array_merge($params, ["%$search%", "%$search%", "%$search%", "%$search%"]);
+    }
+    if ($status) {
+        $where[]  = 'status = ?';
+        $params[] = $status;
+    }
+    if ($proto) {
+        $where[]  = 'protocol = ?';
+        $params[] = $proto;
+    }
+    if ($dateFrom) {
+        $where[]  = 'created_at >= ?';
+        $params[] = strtotime($dateFrom . ' 00:00:00');
+    }
+    if ($dateTo) {
+        $where[]  = 'created_at <= ?';
+        $params[] = strtotime($dateTo . ' 23:59:59');
+    }
+
+    $whereStr = implode(' AND ', $where);
+    $total    = (int)(DB::row("SELECT COUNT(*) as c FROM danamon_transactions WHERE {$whereStr}", $params)['c'] ?? 0);
+    $rows     = DB::query("SELECT * FROM danamon_transactions WHERE {$whereStr} ORDER BY id DESC LIMIT {$limit} OFFSET {$offset}", $params);
+
+    // Summary stats
+    $summary  = DB::query("SELECT status, COUNT(*) as cnt, SUM(amount) as total FROM danamon_transactions GROUP BY status ORDER BY cnt DESC");
+    $protocols= DB::query("SELECT DISTINCT protocol FROM danamon_transactions ORDER BY protocol");
+
+    $totalPages = max(1, (int)ceil($total / $limit));
+
+    // Detail view
+    if (isset($_GET['id'])) {
+        $row = DB::row("SELECT * FROM danamon_transactions WHERE id=?", [(int)$_GET['id']]);
+        renderLayout('Detail Transaksi Bank', function() use ($row) { renderTrxDanamonDetail($row); });
+        return;
+    }
+
+    renderLayout('Transaksi Bank', function() use ($rows,$total,$page_n,$totalPages,$summary,$protocols,$search,$status,$proto,$dateFrom,$dateTo,$limit) {
+        renderTrxDanamonPage($rows,$total,$page_n,$totalPages,$summary,$protocols,$search,$status,$proto,$dateFrom,$dateTo,$limit);
+    });
+}
+
+// ── D-WALLET ─────────────────────────────────────────────────────────
+function handleTrxDwallet(): void {
+    requireLogin();
+
+    $tab    = $_GET['tab']  ?? 'wallets';
+    $page_n = max(1, (int)($_GET['p'] ?? 1));
+    $search = trim($_GET['search'] ?? '');
+    $limit  = 20;
+    $offset = ($page_n - 1) * $limit;
+
+    if ($tab === 'wallets') {
+        $where  = '1=1';
+        $params = [];
+        if ($search) {
+            $where    = '(customer_code LIKE ? OR account_number LIKE ?)';
+            $params   = ["%$search%", "%$search%"];
+        }
+        $total      = (int)(DB::row("SELECT COUNT(*) as c FROM dwallet_wallets WHERE {$where}", $params)['c'] ?? 0);
+        $rows       = DB::query("SELECT * FROM dwallet_wallets WHERE {$where} ORDER BY id DESC LIMIT {$limit} OFFSET {$offset}", $params);
+        $totalPages = max(1, (int)ceil($total / $limit));
+        $totalBalance = (float)(DB::row("SELECT SUM(balance) as s FROM dwallet_wallets WHERE status='active'")['s'] ?? 0);
+
+        renderLayout('D-Wallet', function() use ($rows,$total,$page_n,$totalPages,$search,$totalBalance,$tab,$limit) {
+            renderDwalletPage($rows,$total,$page_n,$totalPages,$search,$totalBalance,$tab,$limit,'wallets');
+        });
+        return;
+    }
+
+    if ($tab === 'transactions') {
+        $jenis  = trim($_GET['jenis'] ?? '');
+        $status = trim($_GET['status'] ?? '');
+        $where  = ['1=1'];
+        $params = [];
+        if ($search) {
+            $where[]  = '(faktur LIKE ? OR kode_sender LIKE ? OR kode_receiver LIKE ? OR keterangan LIKE ?)';
+            $params   = array_merge($params, ["%$search%","%$search%","%$search%","%$search%"]);
+        }
+        if ($jenis)  { $where[] = 'jenis = ?';  $params[] = $jenis; }
+        if ($status) { $where[] = 'status = ?'; $params[] = $status; }
+        $whereStr   = implode(' AND ', $where);
+        $total      = (int)(DB::row("SELECT COUNT(*) as c FROM dwallet_transactions WHERE {$whereStr}", $params)['c'] ?? 0);
+        $rows       = DB::query("SELECT * FROM dwallet_transactions WHERE {$whereStr} ORDER BY id DESC LIMIT {$limit} OFFSET {$offset}", $params);
+        $totalPages = max(1, (int)ceil($total / $limit));
+        $sumByJenis = DB::query("SELECT jenis, COUNT(*) as cnt, SUM(gross_amount) as total FROM dwallet_transactions GROUP BY jenis");
+
+        renderLayout('D-Wallet — Transaksi', function() use ($rows,$total,$page_n,$totalPages,$search,$jenis,$status,$sumByJenis,$tab,$limit) {
+            renderDwalletPage($rows,$total,$page_n,$totalPages,$search,0,$tab,$limit,'transactions',$jenis,$status,$sumByJenis);
+        });
+        return;
+    }
+
+    if ($tab === 'journal') {
+        $where  = '1=1';
+        $params = [];
+        if ($search) {
+            $where    = '(faktur LIKE ? OR rekening LIKE ? OR keterangan LIKE ?)';
+            $params   = ["%$search%","%$search%","%$search%"];
+        }
+        $total      = (int)(DB::row("SELECT COUNT(*) as c FROM dwallet_journal WHERE {$where}", $params)['c'] ?? 0);
+        $rows       = DB::query("SELECT * FROM dwallet_journal WHERE {$where} ORDER BY id DESC LIMIT {$limit} OFFSET {$offset}", $params);
+        $totalPages = max(1, (int)ceil($total / $limit));
+
+        renderLayout('D-Wallet — Jurnal', function() use ($rows,$total,$page_n,$totalPages,$search,$tab,$limit) {
+            renderDwalletPage($rows,$total,$page_n,$totalPages,$search,0,$tab,$limit,'journal');
+        });
+        return;
+    }
+
+    redirect('?page=trx_dwallet&tab=wallets');
+}
+
+// ── PENJUALAN PULSA (pulsa_penjualan) ────────────────────────────────
+function handleTrxPulsa(): void {
+    requireLogin();
+
+    $page_n  = max(1, (int)($_GET['p']       ?? 1));
+    $search  = trim($_GET['search']           ?? '');
+    $status  = trim($_GET['status']           ?? '');
+    $dateFrom= trim($_GET['date_from']        ?? '');
+    $dateTo  = trim($_GET['date_to']          ?? '');
+    $limit   = 20;
+    $offset  = ($page_n - 1) * $limit;
+
+    // Use current year's table (pulsa_penjualan_2025 or fallback to main)
+    $year    = (int)date('Y');
+    $tbl     = "pulsa_penjualan_{$year}";
+    // Check if year table exists, fallback to pulsa_penjualan
+    try {
+        DB::get()->query("SELECT 1 FROM `{$tbl}` LIMIT 1");
+    } catch (\PDOException $e) {
+        $tbl = 'pulsa_penjualan';
+    }
+
+    $where  = ['1=1'];
+    $params = [];
+    if ($search) {
+        $where[]  = '(Kode LIKE ? OR HP LIKE ? OR KodeCustomer LIKE ? OR TrxID LIKE ?)';
+        $params   = array_merge($params, ["%$search%","%$search%","%$search%","%$search%"]);
+    }
+    if ($status) {
+        $where[]  = 'Status = ?';
+        $params[] = $status;
+    }
+    if ($dateFrom) {
+        $where[]  = 'Tgl >= ?';
+        $params[] = $dateFrom;
+    }
+    if ($dateTo) {
+        $where[]  = 'Tgl <= ?';
+        $params[] = $dateTo;
+    }
+
+    $whereStr = implode(' AND ', $where);
+    $total    = (int)(DB::row("SELECT COUNT(*) as c FROM `{$tbl}` WHERE {$whereStr}", $params)['c'] ?? 0);
+    $rows     = DB::query("SELECT ID,Tgl,KodeCustomer,JenisTrx,Kode,HP,HJ_Nasabah,HJ,HB,Status,SN,TrxID,DateTime FROM `{$tbl}` WHERE {$whereStr} ORDER BY ID DESC LIMIT {$limit} OFFSET {$offset}", $params);
+
+    $summary  = DB::query("SELECT Status, COUNT(*) as cnt, SUM(HJ) as total_hj FROM `{$tbl}` GROUP BY Status");
+    $totalPages = max(1, (int)ceil($total / $limit));
+
+    renderLayout('Penjualan Pulsa', function() use ($rows,$total,$page_n,$totalPages,$summary,$search,$status,$dateFrom,$dateTo,$tbl,$limit) {
+        renderTrxPulsaPage($rows,$total,$page_n,$totalPages,$summary,$search,$status,$dateFrom,$dateTo,$tbl,$limit);
+    });
+}
+
+// ── TRANSAKSI QRIS ───────────────────────────────────────────────────
+function handleTrxQris(): void {
+    requireLogin();
+
+    $page_n  = max(1, (int)($_GET['p']      ?? 1));
+    $search  = trim($_GET['search']          ?? '');
+    $status  = trim($_GET['status']          ?? '');
+    $dateFrom= trim($_GET['date_from']       ?? '');
+    $dateTo  = trim($_GET['date_to']         ?? '');
+    $limit   = 20;
+    $offset  = ($page_n - 1) * $limit;
+
+    $where  = ['1=1'];
+    $params = [];
+    if ($search) {
+        $where[]  = '(external_id LIKE ? OR reference_no LIKE ? OR partner_reference_no LIKE ? OR merchant_id LIKE ?)';
+        $params   = array_merge($params, ["%$search%","%$search%","%$search%","%$search%"]);
+    }
+    if ($status) {
+        $where[]  = 'status = ?';
+        $params[] = $status;
+    }
+    if ($dateFrom) {
+        $where[]  = 'DATE(transaction_date) >= ?';
+        $params[] = $dateFrom;
+    }
+    if ($dateTo) {
+        $where[]  = 'DATE(transaction_date) <= ?';
+        $params[] = $dateTo;
+    }
+
+    $whereStr   = implode(' AND ', $where);
+    $total      = (int)(DB::row("SELECT COUNT(*) as c FROM qris_transactions WHERE {$whereStr}", $params)['c'] ?? 0);
+    $rows       = DB::query("SELECT * FROM qris_transactions WHERE {$whereStr} ORDER BY id DESC LIMIT {$limit} OFFSET {$offset}", $params);
+    $summary    = DB::query("SELECT status, COUNT(*) as cnt, SUM(amount) as total FROM qris_transactions GROUP BY status ORDER BY cnt DESC");
+    $totalPages = max(1, (int)ceil($total / $limit));
+
+    renderLayout('Transaksi QRIS', function() use ($rows,$total,$page_n,$totalPages,$summary,$search,$status,$dateFrom,$dateTo,$limit) {
+        renderTrxQrisPage($rows,$total,$page_n,$totalPages,$summary,$search,$status,$dateFrom,$dateTo,$limit);
+    });
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // RENDER FUNCTIONS
 // ══════════════════════════════════════════════════════════════════════
 
@@ -952,6 +1217,11 @@ tailwind.config = {
         ['page' => 'customers',    'icon' => 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4', 'text' => 'Customer'],
         ['page' => 'templates',    'icon' => 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01', 'text' => 'Template Notifikasi'],
         ['page' => 'message_stats','icon' => 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z', 'text' => 'Log Pengiriman'],
+        'sep',
+        ['page' => 'trx_danamon',  'icon' => 'M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z', 'text' => 'Transaksi Bank'],
+        ['page' => 'trx_dwallet',  'icon' => 'M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z', 'text' => 'D-Wallet'],
+        ['page' => 'trx_pulsa',    'icon' => 'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z', 'text' => 'Penjualan Pulsa'],
+        ['page' => 'trx_qris',     'icon' => 'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8H3a2 2 0 00-2 2v8a2 2 0 002 2h4.01M9 8V5a2 2 0 012-2h2a2 2 0 012 2v3m-3 0h.01', 'text' => 'Transaksi QRIS'],
         'sep',
         ['page' => 'users',        'icon' => 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.653-.165-1.294-.478-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.653.165-1.294.478-1.857m0 0a5.002 5.002 0 019.044 0M9 13a2 2 0 11-4 0 2 2 0 014 0zm9 0a2 2 0 11-4 0 2 2 0 014 0z', 'text' => 'Pengguna', 'admin' => true],
         ['page' => 'roles',        'icon' => 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z', 'text' => 'Master Peran', 'admin' => true],
@@ -2262,6 +2532,564 @@ function renderPagination(int $current, int $total, string $baseUrl): void {
         </a>
         <?php endif; ?>
       </div>
+    </div>
+    <?php
+}
+
+// ─── RENDER: TRANSAKSI BANK (danamon_transactions) ───────────────────
+function renderTrxDanamonPage(array $rows, int $total, int $page_n, int $totalPages, array $summary, array $protocols, string $search, string $status, string $proto, string $dateFrom, string $dateTo, int $limit): void {
+    $qBase = '?page=trx_danamon' . ($search ? '&search=' . urlencode($search) : '') . ($status ? '&status=' . urlencode($status) : '') . ($proto ? '&protocol=' . urlencode($proto) : '') . ($dateFrom ? '&date_from=' . urlencode($dateFrom) : '') . ($dateTo ? '&date_to=' . urlencode($dateTo) : '');
+    ?>
+    <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <svg class="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4M4 10h16v11H4V10z"/></svg>
+          Transaksi Bank (Danamon)
+        </h1>
+        <p class="text-sm text-gray-500 mt-0.5"><?= number_format($total) ?> transaksi ditemukan</p>
+      </div>
+    </div>
+
+    <!-- Summary Cards -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+      <?php foreach ($summary as $s):
+        $c = ['SUCCESS'=>'green','PENDING'=>'amber','FAILED'=>'red','PROCESSED'=>'blue'][$s['status']] ?? 'slate'; ?>
+      <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 p-4 shadow-sm">
+        <div class="text-xs text-slate-400 mb-1"><?= h($s['status']) ?></div>
+        <div class="text-lg font-bold text-<?= $c ?>-600 dark:text-<?= $c ?>-400"><?= number_format((int)$s['cnt']) ?></div>
+        <div class="text-xs text-slate-500 mt-0.5"><?= rupiah($s['total'] ?? 0, true) ?></div>
+      </div>
+      <?php endforeach; ?>
+    </div>
+
+    <!-- Filters -->
+    <form method="GET" class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 p-4 shadow-sm mb-4 flex flex-wrap gap-3 items-end">
+      <input type="hidden" name="page" value="trx_danamon">
+      <div class="flex-1 min-w-[160px]">
+        <label class="block text-xs text-slate-500 mb-1">Cari</label>
+        <input type="text" name="search" value="<?= h($search) ?>" placeholder="Faktur / Ref No / Rekening..."
+          class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Status</label>
+        <select name="status" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+          <option value="">Semua Status</option>
+          <?php foreach (['PENDING','SUCCESS','FAILED','PROCESSED'] as $st): ?>
+          <option value="<?= $st ?>" <?= $status === $st ? 'selected' : '' ?>><?= $st ?></option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <div class="min-w-[140px]">
+        <label class="block text-xs text-slate-500 mb-1">Protokol</label>
+        <select name="protocol" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+          <option value="">Semua</option>
+          <?php foreach ($protocols as $p): ?>
+          <option value="<?= h($p['protocol']) ?>" <?= $proto === $p['protocol'] ? 'selected' : '' ?>><?= h($p['protocol']) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Dari Tanggal</label>
+        <input type="date" name="date_from" value="<?= h($dateFrom) ?>" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Sampai Tanggal</label>
+        <input type="date" name="date_to" value="<?= h($dateTo) ?>" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors whitespace-nowrap">Filter</button>
+      <a href="?page=trx_danamon" class="px-4 py-2 border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors whitespace-nowrap">Reset</a>
+    </form>
+
+    <!-- Table -->
+    <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">Faktur</th>
+              <th class="px-4 py-3 text-left">Protokol</th>
+              <th class="px-4 py-3 text-left">Rekening Asal</th>
+              <th class="px-4 py-3 text-left">Rekening Tujuan</th>
+              <th class="px-4 py-3 text-right">Nominal</th>
+              <th class="px-4 py-3 text-center">Status</th>
+              <th class="px-4 py-3 text-left">Tanggal</th>
+              <th class="px-4 py-3 text-center">Detail</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php if (empty($rows)): ?>
+            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada data transaksi.</td></tr>
+            <?php else: foreach ($rows as $r): ?>
+            <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+              <td class="px-4 py-3 font-mono text-xs text-blue-600 dark:text-blue-400 whitespace-nowrap"><?= h($r['faktur']) ?></td>
+              <td class="px-4 py-3">
+                <span class="px-2 py-0.5 text-xs rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 font-medium"><?= h($r['protocol']) ?></span>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($r['source_account'] ?? '—') ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($r['destination_account'] ?? '—') ?></td>
+              <td class="px-4 py-3 text-right font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap"><?= $r['amount'] > 0 ? rupiah($r['amount']) : '<span class="text-slate-400">—</span>' ?></td>
+              <td class="px-4 py-3 text-center"><?= statusBadge((string)$r['status']) ?></td>
+              <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= $r['created_at'] ? formatDate((int)$r['created_at']) : '—' ?></td>
+              <td class="px-4 py-3 text-center">
+                <a href="?page=trx_danamon&id=<?= $r['id'] ?>" class="text-xs px-2 py-1 rounded border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-gray-700 transition-colors">Detail</a>
+              </td>
+            </tr>
+            <?php endforeach; endif; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php renderPagination($page_n, $totalPages, $qBase); ?>
+    </div>
+    <?php
+}
+
+function renderTrxDanamonDetail(?array $row): void {
+    if (!$row) { echo '<div class="p-8 text-center text-slate-400">Transaksi tidak ditemukan.</div>'; return; }
+    $req = @json_decode($row['req_payload'] ?? '', true);
+    $res = @json_decode($row['res_payload'] ?? '', true);
+    ?>
+    <div class="max-w-3xl">
+      <div class="mb-4 flex items-center gap-3">
+        <a href="?page=trx_danamon" class="text-sm text-blue-600 hover:underline">&larr; Kembali</a>
+        <span class="text-slate-400">/</span>
+        <span class="text-sm font-mono text-slate-700 dark:text-slate-300"><?= h($row['faktur']) ?></span>
+      </div>
+      <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm p-6 space-y-5">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-bold text-gray-900 dark:text-white"><?= h($row['faktur']) ?></h2>
+          <?= statusBadge((string)$row['status']) ?>
+        </div>
+        <div class="grid grid-cols-2 gap-4 text-sm">
+          <?php $fields = ['Protokol'=>$row['protocol'],'Modul'=>$row['module'],'Ref No'=>$row['ref_no'],'Rekening Asal'=>$row['source_account'],'Rekening Tujuan'=>$row['destination_account'],'Nominal'=>rupiah($row['amount'] ?? 0),'Dibuat'=>formatDate((int)$row['created_at']),'Diperbarui'=>formatDate((int)$row['updated_at'])];
+          foreach ($fields as $label => $val): ?>
+          <div><div class="text-xs text-slate-400 mb-0.5"><?= $label ?></div><div class="font-medium text-slate-800 dark:text-slate-200"><?= h((string)($val ?? '—')) ?></div></div>
+          <?php endforeach; ?>
+        </div>
+        <?php if ($req): ?>
+        <div>
+          <div class="text-xs font-semibold text-slate-400 uppercase mb-2">Request Payload</div>
+          <pre class="bg-slate-50 dark:bg-gray-900 rounded-lg p-4 text-xs font-mono text-slate-700 dark:text-slate-300 overflow-x-auto"><?= h(json_encode($req, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) ?></pre>
+        </div>
+        <?php endif; ?>
+        <?php if ($res): ?>
+        <div>
+          <div class="text-xs font-semibold text-slate-400 uppercase mb-2">Response Payload</div>
+          <pre class="bg-slate-50 dark:bg-gray-900 rounded-lg p-4 text-xs font-mono text-slate-700 dark:text-slate-300 overflow-x-auto"><?= h(json_encode($res, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)) ?></pre>
+        </div>
+        <?php endif; ?>
+      </div>
+    </div>
+    <?php
+}
+
+// ─── RENDER: D-WALLET ────────────────────────────────────────────────
+function renderDwalletPage(array $rows, int $total, int $page_n, int $totalPages, string $search, float $totalBalance, string $activeTab, int $limit, string $tab, string $jenis = '', string $statusFilter = '', array $sumByJenis = []): void {
+    $tabs = ['wallets' => 'Dompet', 'transactions' => 'Transaksi', 'journal' => 'Jurnal'];
+    $qBase = "?page=trx_dwallet&tab={$tab}" . ($search ? '&search=' . urlencode($search) : '') . ($jenis ? '&jenis=' . urlencode($jenis) : '') . ($statusFilter ? '&status=' . urlencode($statusFilter) : '');
+    ?>
+    <div class="mb-6">
+      <h1 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+        <svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>
+        D-Wallet
+      </h1>
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex gap-1 mb-4 bg-slate-100 dark:bg-gray-900 rounded-xl p-1 w-fit">
+      <?php foreach ($tabs as $t => $label): ?>
+      <a href="?page=trx_dwallet&tab=<?= $t ?>" class="px-4 py-2 text-sm font-medium rounded-lg transition-colors <?= $activeTab === $t ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700 dark:hover:text-slate-300' ?>">
+        <?= $label ?>
+      </a>
+      <?php endforeach; ?>
+    </div>
+
+    <?php if ($tab === 'wallets'): ?>
+    <!-- Wallets Tab -->
+    <?php if ($totalBalance > 0): ?>
+    <div class="bg-gradient-to-r from-emerald-500 to-teal-600 rounded-xl p-5 text-white mb-4 shadow-sm">
+      <div class="text-xs opacity-80 mb-1">Total Saldo Aktif</div>
+      <div class="text-2xl font-bold"><?= rupiah($totalBalance) ?></div>
+      <div class="text-xs opacity-70 mt-1"><?= number_format($total) ?> wallet aktif</div>
+    </div>
+    <?php endif; ?>
+    <form method="GET" class="flex gap-3 mb-4">
+      <input type="hidden" name="page" value="trx_dwallet">
+      <input type="hidden" name="tab" value="wallets">
+      <input type="text" name="search" value="<?= h($search) ?>" placeholder="Kode Customer / Nomor Rekening..."
+        class="flex-1 px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg">Cari</button>
+      <a href="?page=trx_dwallet&tab=wallets" class="px-4 py-2 border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">Reset</a>
+    </form>
+    <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">Kode Customer</th>
+              <th class="px-4 py-3 text-left">No. Rekening</th>
+              <th class="px-4 py-3 text-right">Saldo</th>
+              <th class="px-4 py-3 text-right">Hold</th>
+              <th class="px-4 py-3 text-center">Status</th>
+              <th class="px-4 py-3 text-left">Dibuat</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php if (empty($rows)): ?>
+            <tr><td colspan="6" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada wallet.</td></tr>
+            <?php else: foreach ($rows as $r): ?>
+            <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+              <td class="px-4 py-3 font-semibold text-slate-900 dark:text-white font-mono"><?= h($r['customer_code']) ?></td>
+              <td class="px-4 py-3 font-mono text-blue-600 dark:text-blue-400"><?= h($r['account_number']) ?></td>
+              <td class="px-4 py-3 text-right font-semibold text-emerald-600 dark:text-emerald-400"><?= rupiah($r['balance']) ?></td>
+              <td class="px-4 py-3 text-right text-amber-600 dark:text-amber-400"><?= $r['hold_balance'] > 0 ? rupiah($r['hold_balance']) : '<span class="text-slate-300">—</span>' ?></td>
+              <td class="px-4 py-3 text-center"><?= statusBadge($r['status']) ?></td>
+              <td class="px-4 py-3 text-xs text-slate-400"><?= h(substr((string)$r['created_at'], 0, 16)) ?></td>
+            </tr>
+            <?php endforeach; endif; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php renderPagination($page_n, $totalPages, $qBase); ?>
+    </div>
+
+    <?php elseif ($tab === 'transactions'): ?>
+    <!-- Transactions Tab -->
+    <?php if (!empty($sumByJenis)): ?>
+    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
+      <?php foreach ($sumByJenis as $s):
+        $c = ['CASHIN'=>'green','CASHOUT'=>'red','TRANSFER'=>'blue','PAYMENT'=>'purple','REFUND'=>'amber'][$s['jenis']] ?? 'slate'; ?>
+      <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 p-3 shadow-sm text-center">
+        <div class="text-[10px] text-slate-400 mb-1"><?= h($s['jenis']) ?></div>
+        <div class="text-base font-bold text-<?= $c ?>-600"><?= number_format((int)$s['cnt']) ?></div>
+        <div class="text-[10px] text-slate-400"><?= rupiah($s['total'], true) ?></div>
+      </div>
+      <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+    <form method="GET" class="flex flex-wrap gap-3 mb-4">
+      <input type="hidden" name="page" value="trx_dwallet">
+      <input type="hidden" name="tab" value="transactions">
+      <input type="text" name="search" value="<?= h($search) ?>" placeholder="Faktur / Kode / Keterangan..."
+        class="flex-1 min-w-[200px] px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      <select name="jenis" class="px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+        <option value="">Semua Jenis</option>
+        <?php foreach (['CASHIN','CASHOUT','TRANSFER','PAYMENT','REFUND'] as $j): ?>
+        <option value="<?= $j ?>" <?= $jenis === $j ? 'selected' : '' ?>><?= $j ?></option>
+        <?php endforeach; ?>
+      </select>
+      <select name="status" class="px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+        <option value="">Semua Status</option>
+        <?php foreach (['P'=>'Pending','S'=>'Success','G'=>'Gagal','R'=>'Reversed'] as $sv => $sl): ?>
+        <option value="<?= $sv ?>" <?= $statusFilter === $sv ? 'selected' : '' ?>><?= $sl ?></option>
+        <?php endforeach; ?>
+      </select>
+      <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg">Filter</button>
+      <a href="?page=trx_dwallet&tab=transactions" class="px-4 py-2 border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">Reset</a>
+    </form>
+    <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">Faktur</th>
+              <th class="px-4 py-3 text-left">Jenis</th>
+              <th class="px-4 py-3 text-left">Pengirim</th>
+              <th class="px-4 py-3 text-left">Penerima</th>
+              <th class="px-4 py-3 text-right">Nominal</th>
+              <th class="px-4 py-3 text-right">Fee</th>
+              <th class="px-4 py-3 text-center">Status</th>
+              <th class="px-4 py-3 text-left">Tanggal</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php if (empty($rows)): ?>
+            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada transaksi.</td></tr>
+            <?php else: foreach ($rows as $r):
+              $statusMap = ['P'=>'PENDING','S'=>'SUCCESS','G'=>'FAILED','R'=>'REVERSED'];
+              $displayStatus = $statusMap[$r['status']] ?? $r['status'];
+            ?>
+            <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+              <td class="px-4 py-3 font-mono text-xs text-blue-600 dark:text-blue-400"><?= h($r['faktur']) ?></td>
+              <td class="px-4 py-3">
+                <?php $jColor = ['CASHIN'=>'green','CASHOUT'=>'red','TRANSFER'=>'blue','PAYMENT'=>'purple','REFUND'=>'amber'][$r['jenis']] ?? 'slate'; ?>
+                <span class="px-2 py-0.5 text-xs rounded-full bg-<?= $jColor ?>-100 text-<?= $jColor ?>-700 dark:bg-<?= $jColor ?>-900/30 dark:text-<?= $jColor ?>-300 font-medium"><?= h($r['jenis']) ?></span>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($r['kode_sender'] ?? '—') ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($r['kode_receiver'] ?? '—') ?></td>
+              <td class="px-4 py-3 text-right font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap"><?= rupiah($r['amount']) ?></td>
+              <td class="px-4 py-3 text-right text-xs text-slate-500"><?= $r['fee'] > 0 ? rupiah($r['fee']) : '—' ?></td>
+              <td class="px-4 py-3 text-center"><?= statusBadge($displayStatus) ?></td>
+              <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= h(substr((string)$r['created_at'], 0, 16)) ?></td>
+            </tr>
+            <?php endforeach; endif; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php renderPagination($page_n, $totalPages, $qBase); ?>
+    </div>
+
+    <?php else: // journal ?>
+    <!-- Journal Tab -->
+    <form method="GET" class="flex gap-3 mb-4">
+      <input type="hidden" name="page" value="trx_dwallet">
+      <input type="hidden" name="tab" value="journal">
+      <input type="text" name="search" value="<?= h($search) ?>" placeholder="Faktur / Rekening / Keterangan..."
+        class="flex-1 px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg">Cari</button>
+      <a href="?page=trx_dwallet&tab=journal" class="px-4 py-2 border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">Reset</a>
+    </form>
+    <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">Faktur</th>
+              <th class="px-4 py-3 text-left">Jenis Trx</th>
+              <th class="px-4 py-3 text-left">Rekening</th>
+              <th class="px-4 py-3 text-center">Urut</th>
+              <th class="px-4 py-3 text-right">Debet</th>
+              <th class="px-4 py-3 text-right">Kredit</th>
+              <th class="px-4 py-3 text-left">Keterangan</th>
+              <th class="px-4 py-3 text-left">Tanggal</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php if (empty($rows)): ?>
+            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada data jurnal.</td></tr>
+            <?php else: foreach ($rows as $r): ?>
+            <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+              <td class="px-4 py-3 font-mono text-xs text-blue-600 dark:text-blue-400"><?= h($r['faktur']) ?></td>
+              <td class="px-4 py-3 text-xs text-slate-600 dark:text-slate-300"><?= h($r['jenis_transaksi']) ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300"><?= h($r['rekening']) ?></td>
+              <td class="px-4 py-3 text-center text-xs text-slate-400"><?= h((string)$r['urut']) ?></td>
+              <td class="px-4 py-3 text-right font-semibold <?= $r['debet'] > 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-300' ?>"><?= $r['debet'] > 0 ? rupiah($r['debet']) : '—' ?></td>
+              <td class="px-4 py-3 text-right font-semibold <?= $r['kredit'] > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-300' ?>"><?= $r['kredit'] > 0 ? rupiah($r['kredit']) : '—' ?></td>
+              <td class="px-4 py-3 text-xs text-slate-500 max-w-xs truncate"><?= h($r['keterangan'] ?? '—') ?></td>
+              <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= h((string)$r['tgl']) ?></td>
+            </tr>
+            <?php endforeach; endif; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php renderPagination($page_n, $totalPages, $qBase); ?>
+    </div>
+    <?php endif; ?>
+    <?php
+}
+
+// ─── RENDER: PENJUALAN PULSA ─────────────────────────────────────────
+function renderTrxPulsaPage(array $rows, int $total, int $page_n, int $totalPages, array $summary, string $search, string $status, string $dateFrom, string $dateTo, string $tbl, int $limit): void {
+    $qBase = '?page=trx_pulsa' . ($search ? '&search=' . urlencode($search) : '') . ($status ? '&status=' . urlencode($status) : '') . ($dateFrom ? '&date_from=' . urlencode($dateFrom) : '') . ($dateTo ? '&date_to=' . urlencode($dateTo) : '');
+    $statusLabels = ['S'=>'Sukses','P'=>'Pending','G'=>'Gagal','0'=>'Open'];
+    $statusColors = ['S'=>'green','P'=>'amber','G'=>'red','0'=>'slate'];
+    ?>
+    <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <svg class="w-5 h-5 text-violet-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+          Penjualan Pulsa
+        </h1>
+        <p class="text-sm text-gray-500 mt-0.5"><?= number_format($total) ?> transaksi &mdash; Tabel: <code class="text-xs bg-slate-100 dark:bg-gray-700 px-1 rounded"><?= h($tbl) ?></code></p>
+      </div>
+    </div>
+
+    <!-- Summary -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+      <?php foreach ($summary as $s):
+        $c = $statusColors[$s['Status']] ?? 'slate';
+        $l = $statusLabels[$s['Status']] ?? $s['Status']; ?>
+      <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 p-4 shadow-sm">
+        <div class="text-xs text-slate-400 mb-1"><?= h($l) ?></div>
+        <div class="text-lg font-bold text-<?= $c ?>-600 dark:text-<?= $c ?>-400"><?= number_format((int)$s['cnt']) ?></div>
+        <div class="text-xs text-slate-500 mt-0.5"><?= rupiah($s['total_hj'] ?? 0, true) ?></div>
+      </div>
+      <?php endforeach; ?>
+    </div>
+
+    <!-- Filters -->
+    <form method="GET" class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 p-4 shadow-sm mb-4 flex flex-wrap gap-3 items-end">
+      <input type="hidden" name="page" value="trx_pulsa">
+      <div class="flex-1 min-w-[160px]">
+        <label class="block text-xs text-slate-500 mb-1">Cari</label>
+        <input type="text" name="search" value="<?= h($search) ?>" placeholder="Kode / HP / Customer / TrxID..."
+          class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <div class="min-w-[120px]">
+        <label class="block text-xs text-slate-500 mb-1">Status</label>
+        <select name="status" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+          <option value="">Semua</option>
+          <?php foreach ($statusLabels as $sv => $sl): ?>
+          <option value="<?= $sv ?>" <?= $status === $sv ? 'selected' : '' ?>><?= $sl ?></option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Dari Tanggal</label>
+        <input type="date" name="date_from" value="<?= h($dateFrom) ?>" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Sampai Tanggal</label>
+        <input type="date" name="date_to" value="<?= h($dateTo) ?>" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg">Filter</button>
+      <a href="?page=trx_pulsa" class="px-4 py-2 border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">Reset</a>
+    </form>
+
+    <!-- Table -->
+    <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">ID / Tanggal</th>
+              <th class="px-4 py-3 text-left">Customer</th>
+              <th class="px-4 py-3 text-left">Jenis / Kode</th>
+              <th class="px-4 py-3 text-left">HP Tujuan</th>
+              <th class="px-4 py-3 text-right">HJ Nasabah</th>
+              <th class="px-4 py-3 text-right">HJ / HB</th>
+              <th class="px-4 py-3 text-center">Status</th>
+              <th class="px-4 py-3 text-left">SN / TrxID</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php if (empty($rows)): ?>
+            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada data penjualan.</td></tr>
+            <?php else: foreach ($rows as $r):
+              $sc = $statusColors[$r['Status']] ?? 'slate';
+              $sl = $statusLabels[$r['Status']] ?? $r['Status'];
+            ?>
+            <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+              <td class="px-4 py-3">
+                <div class="font-mono text-xs text-blue-600 dark:text-blue-400">#<?= $r['ID'] ?></div>
+                <div class="text-xs text-slate-400"><?= h((string)$r['Tgl']) ?></div>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300"><?= h($r['KodeCustomer'] ?? '—') ?></td>
+              <td class="px-4 py-3">
+                <div class="text-xs font-semibold text-slate-700 dark:text-slate-300"><?= h($r['JenisTrx'] ?? '—') ?></div>
+                <div class="font-mono text-xs text-slate-500"><?= h($r['Kode'] ?? '—') ?></div>
+              </td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($r['HP'] ?? '—') ?></td>
+              <td class="px-4 py-3 text-right font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap"><?= rupiah($r['HJ_Nasabah'] ?? 0) ?></td>
+              <td class="px-4 py-3 text-right text-xs">
+                <div class="text-slate-700 dark:text-slate-300"><?= rupiah($r['HJ'] ?? 0) ?></div>
+                <div class="text-slate-400"><?= rupiah($r['HB'] ?? 0) ?></div>
+              </td>
+              <td class="px-4 py-3 text-center">
+                <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-<?= $sc ?>-100 text-<?= $sc ?>-700 dark:bg-<?= $sc ?>-900/30 dark:text-<?= $sc ?>-300"><?= h($sl) ?></span>
+              </td>
+              <td class="px-4 py-3">
+                <?php if (!empty($r['SN'])): ?>
+                <div class="font-mono text-xs text-slate-500 truncate max-w-[150px]" title="<?= h($r['SN']) ?>"><?= h(substr($r['SN'], 0, 20)) ?>...</div>
+                <?php endif; ?>
+                <?php if (!empty($r['TrxID'])): ?>
+                <div class="font-mono text-xs text-slate-400 truncate max-w-[150px]"><?= h($r['TrxID']) ?></div>
+                <?php endif; ?>
+              </td>
+            </tr>
+            <?php endforeach; endif; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php renderPagination($page_n, $totalPages, $qBase); ?>
+    </div>
+    <?php
+}
+
+// ─── RENDER: TRANSAKSI QRIS ──────────────────────────────────────────
+function renderTrxQrisPage(array $rows, int $total, int $page_n, int $totalPages, array $summary, string $search, string $status, string $dateFrom, string $dateTo, int $limit): void {
+    $qBase = '?page=trx_qris' . ($search ? '&search=' . urlencode($search) : '') . ($status ? '&status=' . urlencode($status) : '') . ($dateFrom ? '&date_from=' . urlencode($dateFrom) : '') . ($dateTo ? '&date_to=' . urlencode($dateTo) : '');
+    ?>
+    <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <svg class="w-5 h-5 text-orange-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8H3a2 2 0 00-2 2v8a2 2 0 002 2h4.01M9 8V5a2 2 0 012-2h2a2 2 0 012 2v3m-3 0h.01"/></svg>
+          Transaksi QRIS
+        </h1>
+        <p class="text-sm text-gray-500 mt-0.5"><?= number_format($total) ?> transaksi ditemukan</p>
+      </div>
+    </div>
+
+    <!-- Summary -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+      <?php
+      $allStatuses = ['00'=>'green','SUCCESS'=>'green','PENDING'=>'amber','FAILED'=>'red','EXPIRED'=>'slate'];
+      foreach ($summary as $s):
+        $c = $allStatuses[$s['status']] ?? 'slate'; ?>
+      <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 p-4 shadow-sm">
+        <div class="text-xs text-slate-400 mb-1"><?= h($s['status'] ?? 'UNKNOWN') ?></div>
+        <div class="text-lg font-bold text-<?= $c ?>-600 dark:text-<?= $c ?>-400"><?= number_format((int)$s['cnt']) ?></div>
+        <div class="text-xs text-slate-500 mt-0.5"><?= rupiah($s['total'] ?? 0, true) ?></div>
+      </div>
+      <?php endforeach; ?>
+    </div>
+
+    <!-- Filters -->
+    <form method="GET" class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 p-4 shadow-sm mb-4 flex flex-wrap gap-3 items-end">
+      <input type="hidden" name="page" value="trx_qris">
+      <div class="flex-1 min-w-[180px]">
+        <label class="block text-xs text-slate-500 mb-1">Cari</label>
+        <input type="text" name="search" value="<?= h($search) ?>" placeholder="External ID / Ref No / Merchant ID..."
+          class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Status</label>
+        <select name="status" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+          <option value="">Semua Status</option>
+          <?php foreach (array_unique(array_column($summary, 'status')) as $st): ?>
+          <option value="<?= h($st) ?>" <?= $status === $st ? 'selected' : '' ?>><?= h($st) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Dari Tanggal</label>
+        <input type="date" name="date_from" value="<?= h($dateFrom) ?>" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <div class="min-w-[130px]">
+        <label class="block text-xs text-slate-500 mb-1">Sampai Tanggal</label>
+        <input type="date" name="date_to" value="<?= h($dateTo) ?>" class="w-full px-3 py-2 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-slate-50 dark:bg-gray-750 focus:outline-none focus:border-blue-500">
+      </div>
+      <button type="submit" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg">Filter</button>
+      <a href="?page=trx_qris" class="px-4 py-2 border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">Reset</a>
+    </form>
+
+    <!-- Table -->
+    <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-gray-750 text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">ID</th>
+              <th class="px-4 py-3 text-left">External ID</th>
+              <th class="px-4 py-3 text-left">Reference No</th>
+              <th class="px-4 py-3 text-left">Merchant</th>
+              <th class="px-4 py-3 text-right">Nominal</th>
+              <th class="px-4 py-3 text-center">Status</th>
+              <th class="px-4 py-3 text-left">Tgl Transaksi</th>
+              <th class="px-4 py-3 text-left">Dibuat</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php if (empty($rows)): ?>
+            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada transaksi QRIS.</td></tr>
+            <?php else: foreach ($rows as $r): ?>
+            <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+              <td class="px-4 py-3 font-mono text-xs text-slate-400">#<?= $r['id'] ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-blue-600 dark:text-blue-400 max-w-[150px] truncate" title="<?= h($r['external_id'] ?? '') ?>"><?= h($r['external_id'] ?? '—') ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-slate-600 dark:text-slate-300"><?= h($r['reference_no'] ?? '—') ?></td>
+              <td class="px-4 py-3 text-xs">
+                <div class="font-semibold text-slate-700 dark:text-slate-300"><?= h($r['merchant_id'] ?? '—') ?></div>
+                <div class="text-slate-400"><?= h($r['terminal_id'] ?? '') ?></div>
+              </td>
+              <td class="px-4 py-3 text-right font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap"><?= rupiah($r['amount'] ?? 0) ?> <span class="text-xs text-slate-400"><?= h($r['amount_currency'] ?? 'IDR') ?></span></td>
+              <td class="px-4 py-3 text-center"><?= statusBadge((string)($r['status'] ?? '')) ?></td>
+              <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= $r['transaction_date'] ? h(substr((string)$r['transaction_date'], 0, 16)) : '—' ?></td>
+              <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= $r['created_at'] ? h(substr((string)$r['created_at'], 0, 16)) : '—' ?></td>
+            </tr>
+            <?php endforeach; endif; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php renderPagination($page_n, $totalPages, $qBase); ?>
     </div>
     <?php
 }
