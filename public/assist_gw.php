@@ -2076,13 +2076,26 @@ function handleTrxApprove(): void {
     try {
         $tbl = 'pulsa_penjualan';
         $rows = DB::query(
-            "SELECT ID AS trx_id, Nomor AS faktur, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$tbl}' AS _table
+            "SELECT ID AS trx_id, Nomor AS faktur, Kode AS kode, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$tbl}' AS _table
              FROM `{$tbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 30"
         );
         foreach ($rows as $r) {
             $r['_table'] = $tbl;
             $pulsaPending[] = $r;
         }
+
+        // Cek juga tabel tahun berjalan (pulsa_penjualan_YYYY)
+        $yearTbl = 'pulsa_penjualan_' . date('Y');
+        try {
+            $yearRows = DB::query(
+                "SELECT ID AS trx_id, Nomor AS faktur, Kode AS kode, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$yearTbl}' AS _table
+                 FROM `{$yearTbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 30"
+            );
+            foreach ($yearRows as $r) {
+                $r['_table'] = $yearTbl;
+                $pulsaPending[] = $r;
+            }
+        } catch (PDOException $e) { /* tabel tidak ada, skip */ }
     } catch (PDOException $e) {}
 
     $totalPending = count($pendingDanamon) + count($pendingDwallet) + count($pendingQris) + count($pulsaPending);
@@ -5378,18 +5391,22 @@ function renderTrxApprovePage(array $pendingDanamon, array $pendingDwallet, arra
           </thead>
           <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
             <?php foreach ($tRows as $r):
-                $isSnap = in_array(strtoupper((string)($r['info'] ?? '')), ['13']) || in_array(strtoupper((string)($r['faktur'] ?? '')), ['PAYBIFAST','PAYTFDANA']);
-                // Ambil kode dari _table lookup — data antrian hanya punya faktur & info
-                // Untuk deteksi SNAP kita gunakan field faktur (=Nomor) → bisa juga dari info=JenisTrx
-                // Cara terbaik: lihat TRXOrder di DB, tapi kita hanya punya data ringkasan di $r
-                // Gunakan info (=JenisTrx) === '13' sebagai penanda SNAP BiF
-                $isSnap = (string)($r['info'] ?? '') === '13';
+                // Deteksi SNAP: utamakan Kode produk (PAYBIFAST/PAYTFDANA),
+                // fallback ke JenisTrx=13 jika Kode tidak tersedia
+                $rKode  = strtoupper((string)($r['kode'] ?? ''));
+                $isSnap = in_array($rKode, ['PAYBIFAST','PAYTFDANA'])
+                          || (string)($r['info'] ?? '') === '13';
             ?>
             <tr class="hover:bg-amber-50 dark:hover:bg-amber-900/10 transition-colors">
               <td class="px-4 py-3 font-mono text-xs text-slate-400">#<?= (int)$r['trx_id'] ?></td>
               <td class="px-4 py-3 font-mono text-xs text-blue-600 dark:text-blue-400 max-w-[140px] truncate"><?= h((string)($r['faktur'] ?? '—')) ?></td>
               <td class="px-4 py-3">
-                <span class="px-2 py-0.5 text-xs rounded-full <?= $isSnap ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300' : 'bg-slate-100 text-slate-600 dark:bg-gray-700 dark:text-slate-300' ?> font-medium">JenisTrx <?= h((string)($r['info'] ?? '—')) ?></span>
+                <?php if ($rKode): ?>
+                <span class="px-2 py-0.5 text-xs rounded-full <?= $isSnap ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300' : 'bg-slate-100 text-slate-600 dark:bg-gray-700 dark:text-slate-300' ?> font-medium"><?= h($rKode) ?></span>
+                <?php if ($r['info'] ?? ''): ?><span class="text-slate-400 text-xs ml-1">JT<?= h((string)$r['info']) ?></span><?php endif; ?>
+                <?php else: ?>
+                <span class="px-2 py-0.5 text-xs rounded-full bg-slate-100 text-slate-600 dark:bg-gray-700 dark:text-slate-300 font-medium">JenisTrx <?= h((string)($r['info'] ?? '—')) ?></span>
+                <?php endif; ?>
               </td>
               <td class="px-4 py-3 text-xs text-slate-500">
                 <?= h((string)($r['src'] ?? '')) ?>
@@ -5405,7 +5422,7 @@ function renderTrxApprovePage(array $pendingDanamon, array $pendingDwallet, arra
                 <div class="flex flex-col items-center gap-1.5">
                   <?php if ($isSnap && !empty($danamonConfigs)): ?>
                   <!-- SNAP: dropdown config + tombol Kirim ke Transporter -->
-                  <form method="POST" action="?page=trx_approve" class="flex flex-col gap-1" onsubmit="return confirm('Kirim PAYBIFAST/PAYTFDANA #<?= (int)$r['trx_id'] ?> ke Transporter Danamon?')">
+                  <form method="POST" action="?page=trx_approve" class="flex flex-col gap-1" onsubmit="return confirm('Kirim <?= h($rKode ?: 'SNAP') ?> #<?= (int)$r['trx_id'] ?> ke Transporter Danamon?')">
                     <input type="hidden" name="table" value="<?= h($tbl) ?>">
                     <input type="hidden" name="pk" value="ID">
                     <input type="hidden" name="id" value="<?= (int)$r['trx_id'] ?>">
