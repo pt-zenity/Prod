@@ -291,6 +291,12 @@ switch ($page) {
     case 'trx_qris':
         handleTrxQris(); break;
 
+    case 'trx_create':
+        handleTrxCreate(); break;
+
+    case 'trx_approve':
+        handleTrxApprove(); break;
+
     case 'scheduler':
         handleScheduler(); break;
 
@@ -1063,6 +1069,265 @@ function handleTrxQris(): void {
     });
 }
 
+// ── BUAT TRANSAKSI BARU ───────────────────────────────────────────────
+function handleTrxCreate(): void {
+    requireLogin();
+
+    $type  = trim($_POST['trx_type'] ?? $_GET['type'] ?? 'danamon');
+    $error = '';
+    $success = '';
+
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['trx_type'])) {
+        $ts   = time();
+        $rand = random_int(1000, 9999);
+
+        try {
+            switch ($type) {
+                // ── Danamon ────────────────────────────────────────────
+                case 'danamon':
+                    $protocol = trim($_POST['protocol'] ?? 'INQUIRY');
+                    $srcAcc   = trim($_POST['source_account'] ?? '');
+                    $dstAcc   = trim($_POST['destination_account'] ?? '');
+                    $amount   = (float)($_POST['amount'] ?? 0);
+                    $refNo    = trim($_POST['ref_no'] ?? '');
+                    $remark   = trim($_POST['remark'] ?? '');
+
+                    if (!$srcAcc) throw new RuntimeException('Rekening asal wajib diisi.');
+
+                    $prefix  = match($protocol) {
+                        'INQUIRY'        => 'INQ',
+                        'TRANSFER_INTRA' => 'TRF-INTRA',
+                        'TRANSFER_INTER' => 'TRF-INTER',
+                        default          => 'TRX',
+                    };
+                    $faktur  = "{$prefix}-{$ts}-{$rand}";
+                    $payload = json_encode([
+                        'account_number'     => $srcAcc,
+                        'partnerReferenceNo' => $refNo ?: $faktur,
+                        'amount_value'       => $amount,
+                        'beneficiaryAccountNo' => $dstAcc,
+                        'sourceAccountNo'    => $srcAcc,
+                        'remark'             => $remark,
+                    ]);
+
+                    DB::exec(
+                        "INSERT INTO danamon_transactions (faktur,ref_no,module,protocol,source_account,destination_account,amount,status,req_payload,created_at,updated_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        [$faktur, $refNo ?: $faktur, 'danamon', $protocol, $srcAcc, $dstAcc ?: null, $amount, 'PENDING', $payload, $ts, $ts]
+                    );
+                    $success = "Transaksi Bank berhasil dibuat dengan faktur <strong>{$faktur}</strong>, status PENDING menunggu persetujuan.";
+                    logActivity('trx_create', "Buat danamon_transactions faktur={$faktur} protocol={$protocol}");
+                    break;
+
+                // ── D-Wallet ───────────────────────────────────────────
+                case 'dwallet':
+                    $jenis     = trim($_POST['jenis'] ?? 'CASHIN');
+                    $sender    = trim($_POST['kode_sender'] ?? '');
+                    $receiver  = trim($_POST['kode_receiver'] ?? '');
+                    $amount    = (float)($_POST['amount'] ?? 0);
+                    $fee       = (float)($_POST['fee'] ?? 0);
+                    $keterangan = trim($_POST['keterangan'] ?? '');
+
+                    if ($amount <= 0) throw new RuntimeException('Nominal harus lebih dari 0.');
+                    if (!$sender && !$receiver) throw new RuntimeException('Kode pengirim atau penerima wajib diisi.');
+
+                    $faktur  = "DW-{$ts}-{$rand}";
+                    $gross   = $amount + $fee;
+                    $nowDt   = date('Y-m-d H:i:s');
+
+                    DB::exec(
+                        "INSERT INTO dwallet_transactions (faktur,jenis,kode_sender,kode_receiver,amount,fee,gross_amount,keterangan,status,created_at,updated_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        [$faktur, $jenis, $sender ?: null, $receiver ?: null, $amount, $fee, $gross, $keterangan ?: null, 'P', $nowDt, $nowDt]
+                    );
+                    $success = "Transaksi D-Wallet berhasil dibuat dengan faktur <strong>{$faktur}</strong>, status PENDING menunggu persetujuan.";
+                    logActivity('trx_create', "Buat dwallet_transactions faktur={$faktur} jenis={$jenis}");
+                    break;
+
+                // ── QRIS ───────────────────────────────────────────────
+                case 'qris':
+                    $extId     = trim($_POST['external_id'] ?? '');
+                    $refNo     = trim($_POST['reference_no'] ?? '');
+                    $merchantId = trim($_POST['merchant_id'] ?? '');
+                    $terminalId = trim($_POST['terminal_id'] ?? '');
+                    $amount    = (float)($_POST['amount'] ?? 0);
+                    $currency  = trim($_POST['amount_currency'] ?? 'IDR');
+
+                    if ($amount <= 0) throw new RuntimeException('Nominal harus lebih dari 0.');
+                    if (!$merchantId) throw new RuntimeException('Merchant ID wajib diisi.');
+
+                    $extId  = $extId ?: "QRIS-{$ts}-{$rand}";
+                    $refNo  = $refNo ?: $extId;
+                    $nowDt  = date('Y-m-d H:i:s');
+
+                    DB::exec(
+                        "INSERT INTO qris_transactions (external_id,reference_no,partner_reference_no,merchant_id,terminal_id,amount,amount_currency,transaction_date,status,created_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        [$extId, $refNo, $refNo, $merchantId, $terminalId ?: null, $amount, $currency, $nowDt, 'PENDING', $nowDt]
+                    );
+                    $success = "Transaksi QRIS berhasil dibuat, status PENDING menunggu persetujuan.";
+                    logActivity('trx_create', "Buat qris_transactions ext_id={$extId} merchant={$merchantId}");
+                    break;
+
+                default:
+                    throw new RuntimeException('Jenis transaksi tidak dikenal.');
+            }
+        } catch (RuntimeException $e) {
+            $error = $e->getMessage();
+        } catch (PDOException $e) {
+            $error = 'Database error: ' . $e->getMessage();
+        }
+    }
+
+    renderLayout('Buat Transaksi', function() use ($type, $error, $success) {
+        renderTrxCreatePage($type, $error, $success);
+    });
+}
+
+// ── PERSETUJUAN TRANSAKSI ─────────────────────────────────────────────
+function handleTrxApprove(): void {
+    requireLogin();
+
+    // ── POST: proses approve/reject individual + bulk ─────────────────
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        $table      = trim($_POST['table']       ?? '');
+        $id         = (int)($_POST['id']         ?? 0);
+        $action     = trim($_POST['action']      ?? '');
+        $bulkAction = trim($_POST['bulk_action'] ?? '');
+        $bulkIds    = array_map('intval', (array)($_POST['bulk_ids'] ?? []));
+        $back       = trim($_POST['back']        ?? 'trx_approve');
+        $pk         = trim($_POST['pk']          ?? 'id');
+        $statusCol  = trim($_POST['status_col']  ?? 'status');
+
+        // Whitelist tabel yang boleh diubah
+        $allowedTables = [
+            'danamon_transactions'  => ['pk'=>'id',   'status_col'=>'status',   'approve'=>'SUCCESS', 'reject'=>'FAILED',   'ts_col'=>'updated_at', 'ts_type'=>'unix'],
+            'dwallet_transactions'  => ['pk'=>'id',   'status_col'=>'status',   'approve'=>'S',       'reject'=>'G',        'ts_col'=>'updated_at', 'ts_type'=>'datetime'],
+            'qris_transactions'     => ['pk'=>'id',   'status_col'=>'status',   'approve'=>'SUCCESS', 'reject'=>'FAILED',   'ts_col'=>null,         'ts_type'=>null],
+        ];
+
+        // Untuk tabel pulsa_penjualan_*
+        if (preg_match('/^pulsa_penjualan_(\d{4})$/', $table)) {
+            $allowedTables[$table] = ['pk'=>'ID', 'status_col'=>'Status', 'approve'=>'S', 'reject'=>'G', 'ts_col'=>'DateTimeClose', 'ts_type'=>'unix'];
+        }
+
+        if (!isset($allowedTables[$table]) || !$id || !in_array($action, ['approve','reject'])) {
+            // ── Bulk approve/reject ─────────────────────────────────
+            if ($bulkAction === 'approve' && !empty($bulkIds) && isset($allowedTables[$table])) {
+                $cfg       = $allowedTables[$table];
+                $pkCol     = $cfg['pk'];
+                $stCol     = $cfg['status_col'];
+                $newStatus = $cfg['approve'];
+                $count     = 0;
+                foreach ($bulkIds as $bid) {
+                    try {
+                        $sql    = "UPDATE `{$table}` SET `{$stCol}` = ?";
+                        $params = [$newStatus];
+                        if ($cfg['ts_col']) {
+                            $tsVal    = $cfg['ts_type'] === 'unix' ? time() : date('Y-m-d H:i:s');
+                            $sql     .= ", `{$cfg['ts_col']}` = ?";
+                            $params[] = $tsVal;
+                        }
+                        $sql     .= " WHERE `{$pkCol}` = ? AND `{$stCol}` IN ('PENDING','P','pending')";
+                        $params[] = $bid;
+                        DB::exec($sql, $params);
+                        $count++;
+                    } catch (PDOException) {}
+                }
+                setFlash('success', "{$count} transaksi berhasil disetujui secara massal.");
+                logActivity('trx_approve', "Bulk approve {$table}: {$count} transaksi");
+                redirect("?page={$back}");
+                return;
+            }
+            setFlash('error', 'Parameter tidak valid.');
+            redirect("?page={$back}");
+            return;
+        }
+
+        $cfg       = $allowedTables[$table];
+        $newStatus = $action === 'approve' ? $cfg['approve'] : $cfg['reject'];
+        $pkCol     = $cfg['pk'];
+        $stCol     = $cfg['status_col'];
+
+        // Cek record ada dan masih PENDING
+        $row = DB::row("SELECT * FROM `{$table}` WHERE `{$pkCol}` = ?", [$id]);
+        if (!$row) {
+            setFlash('error', 'Transaksi tidak ditemukan.');
+            redirect("?page={$back}");
+            return;
+        }
+        $curStatus = (string)($row[$stCol] ?? '');
+        $pendingStates = ['PENDING','P','pending'];
+        if (!in_array($curStatus, $pendingStates)) {
+            setFlash('warning', "Transaksi sudah diproses sebelumnya (status: {$curStatus}).");
+            redirect("?page={$back}");
+            return;
+        }
+
+        // Update status
+        $sql    = "UPDATE `{$table}` SET `{$stCol}` = ?";
+        $params = [$newStatus];
+
+        if ($cfg['ts_col']) {
+            $tsVal = $cfg['ts_type'] === 'unix' ? time() : date('Y-m-d H:i:s');
+            $sql  .= ", `{$cfg['ts_col']}` = ?";
+            $params[] = $tsVal;
+        }
+        $sql .= " WHERE `{$pkCol}` = ?";
+        $params[] = $id;
+
+        try {
+            DB::exec($sql, $params);
+            $label = $action === 'approve' ? 'disetujui' : 'ditolak';
+            setFlash('success', "Transaksi #{$id} berhasil {$label}.");
+            logActivity('trx_approve', "Transaksi {$table}#{$id} {$label} → status={$newStatus}");
+        } catch (PDOException $e) {
+            setFlash('error', 'Gagal update: ' . $e->getMessage());
+        }
+
+        redirect("?page={$back}");
+        return;
+    }
+
+    // ── GET: tampilkan antrian persetujuan ───────────────────────────
+    // Ambil semua PENDING dari setiap tabel transaksi
+    $pendingDanamon = DB::query(
+        "SELECT id AS trx_id, faktur, protocol AS info, source_account AS src, destination_account AS dst, amount, status, created_at AS ts
+         FROM danamon_transactions WHERE status IN ('PENDING','P') ORDER BY id DESC LIMIT 50"
+    );
+    $pendingDwallet = DB::query(
+        "SELECT id AS trx_id, faktur, jenis AS info, kode_sender AS src, kode_receiver AS dst, amount, status, created_at AS ts
+         FROM dwallet_transactions WHERE status = 'P' ORDER BY id DESC LIMIT 50"
+    );
+    $pendingQris = DB::query(
+        "SELECT id AS trx_id, external_id AS faktur, merchant_id AS info, '' AS src, '' AS dst, amount, status, created_at AS ts
+         FROM qris_transactions WHERE status IN ('PENDING','P','pending') ORDER BY id DESC LIMIT 50"
+    );
+
+    // Pulsa: cari tabel tahun ini dan tahun lalu
+    $pulsaPending = [];
+    $years = [date('Y'), date('Y') - 1];
+    foreach ($years as $yr) {
+        $tbl = "pulsa_penjualan_{$yr}";
+        try {
+            $rows = DB::query(
+                "SELECT ID AS trx_id, Nomor AS faktur, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$tbl}' AS _table
+                 FROM `{$tbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 30"
+            );
+            foreach ($rows as $r) {
+                $r['_table'] = $tbl;
+                $pulsaPending[] = $r;
+            }
+        } catch (PDOException) {}
+    }
+
+    $totalPending = count($pendingDanamon) + count($pendingDwallet) + count($pendingQris) + count($pulsaPending);
+
+    renderLayout('Antrian Persetujuan', function() use ($pendingDanamon,$pendingDwallet,$pendingQris,$pulsaPending,$totalPending) {
+        renderTrxApprovePage($pendingDanamon,$pendingDwallet,$pendingQris,$pulsaPending,$totalPending);
+    });
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // RENDER FUNCTIONS
 // ══════════════════════════════════════════════════════════════════════
@@ -1222,6 +1487,8 @@ tailwind.config = {
         ['page' => 'trx_dwallet',  'icon' => 'M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z', 'text' => 'D-Wallet'],
         ['page' => 'trx_pulsa',    'icon' => 'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z', 'text' => 'Penjualan Pulsa'],
         ['page' => 'trx_qris',     'icon' => 'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8H3a2 2 0 00-2 2v8a2 2 0 002 2h4.01M9 8V5a2 2 0 012-2h2a2 2 0 012 2v3m-3 0h.01', 'text' => 'Transaksi QRIS'],
+        ['page' => 'trx_create',   'icon' => 'M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z', 'text' => 'Buat Transaksi'],
+        ['page' => 'trx_approve',  'icon' => 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z', 'text' => 'Antrian Persetujuan'],
         'sep',
         ['page' => 'users',        'icon' => 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.653-.165-1.294-.478-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.653.165-1.294.478-1.857m0 0a5.002 5.002 0 019.044 0M9 13a2 2 0 11-4 0 2 2 0 014 0zm9 0a2 2 0 11-4 0 2 2 0 014 0z', 'text' => 'Pengguna', 'admin' => true],
         ['page' => 'roles',        'icon' => 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z', 'text' => 'Master Peran', 'admin' => true],
@@ -2631,7 +2898,25 @@ function renderTrxDanamonPage(array $rows, int $total, int $page_n, int $totalPa
               <td class="px-4 py-3 text-center"><?= statusBadge((string)$r['status']) ?></td>
               <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= $r['created_at'] ? formatDate((int)$r['created_at']) : '—' ?></td>
               <td class="px-4 py-3 text-center">
-                <a href="?page=trx_danamon&id=<?= $r['id'] ?>" class="text-xs px-2 py-1 rounded border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-gray-700 transition-colors">Detail</a>
+                <div class="flex items-center justify-center gap-1 flex-wrap">
+                  <a href="?page=trx_danamon&id=<?= $r['id'] ?>" class="text-xs px-2 py-1 rounded border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-gray-700 transition-colors">Detail</a>
+                  <?php if (in_array((string)$r['status'], ['PENDING','P'])): ?>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Setujui transaksi ini?')">
+                    <input type="hidden" name="table" value="danamon_transactions">
+                    <input type="hidden" name="id" value="<?= $r['id'] ?>">
+                    <input type="hidden" name="action" value="approve">
+                    <input type="hidden" name="back" value="trx_danamon">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 transition-colors">✓ Setuju</button>
+                  </form>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Tolak transaksi ini?')">
+                    <input type="hidden" name="table" value="danamon_transactions">
+                    <input type="hidden" name="id" value="<?= $r['id'] ?>">
+                    <input type="hidden" name="action" value="reject">
+                    <input type="hidden" name="back" value="trx_danamon">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-300 transition-colors">✕ Tolak</button>
+                  </form>
+                  <?php endif; ?>
+                </div>
               </td>
             </tr>
             <?php endforeach; endif; ?>
@@ -2799,11 +3084,12 @@ function renderDwalletPage(array $rows, int $total, int $page_n, int $totalPages
               <th class="px-4 py-3 text-right">Fee</th>
               <th class="px-4 py-3 text-center">Status</th>
               <th class="px-4 py-3 text-left">Tanggal</th>
+              <th class="px-4 py-3 text-center">Aksi</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
             <?php if (empty($rows)): ?>
-            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada transaksi.</td></tr>
+            <tr><td colspan="9" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada transaksi.</td></tr>
             <?php else: foreach ($rows as $r):
               $statusMap = ['P'=>'PENDING','S'=>'SUCCESS','G'=>'FAILED','R'=>'REVERSED'];
               $displayStatus = $statusMap[$r['status']] ?? $r['status'];
@@ -2820,6 +3106,28 @@ function renderDwalletPage(array $rows, int $total, int $page_n, int $totalPages
               <td class="px-4 py-3 text-right text-xs text-slate-500"><?= $r['fee'] > 0 ? rupiah($r['fee']) : '—' ?></td>
               <td class="px-4 py-3 text-center"><?= statusBadge($displayStatus) ?></td>
               <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= h(substr((string)$r['created_at'], 0, 16)) ?></td>
+              <td class="px-4 py-3 text-center">
+                <?php if ($r['status'] === 'P'): ?>
+                <div class="flex items-center justify-center gap-1">
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Setujui transaksi ini?')">
+                    <input type="hidden" name="table" value="dwallet_transactions">
+                    <input type="hidden" name="id" value="<?= $r['id'] ?>">
+                    <input type="hidden" name="action" value="approve">
+                    <input type="hidden" name="back" value="trx_dwallet&tab=transactions">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 transition-colors">✓</button>
+                  </form>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Tolak transaksi ini?')">
+                    <input type="hidden" name="table" value="dwallet_transactions">
+                    <input type="hidden" name="id" value="<?= $r['id'] ?>">
+                    <input type="hidden" name="action" value="reject">
+                    <input type="hidden" name="back" value="trx_dwallet&tab=transactions">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-300 transition-colors">✕</button>
+                  </form>
+                </div>
+                <?php else: ?>
+                <span class="text-slate-300 text-xs">—</span>
+                <?php endif; ?>
+              </td>
             </tr>
             <?php endforeach; endif; ?>
           </tbody>
@@ -2949,11 +3257,12 @@ function renderTrxPulsaPage(array $rows, int $total, int $page_n, int $totalPage
               <th class="px-4 py-3 text-right">HJ / HB</th>
               <th class="px-4 py-3 text-center">Status</th>
               <th class="px-4 py-3 text-left">SN / TrxID</th>
+              <th class="px-4 py-3 text-center">Aksi</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
             <?php if (empty($rows)): ?>
-            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada data penjualan.</td></tr>
+            <tr><td colspan="9" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada data penjualan.</td></tr>
             <?php else: foreach ($rows as $r):
               $sc = $statusColors[$r['Status']] ?? 'slate';
               $sl = $statusLabels[$r['Status']] ?? $r['Status'];
@@ -2983,6 +3292,32 @@ function renderTrxPulsaPage(array $rows, int $total, int $page_n, int $totalPage
                 <?php endif; ?>
                 <?php if (!empty($r['TrxID'])): ?>
                 <div class="font-mono text-xs text-slate-400 truncate max-w-[150px]"><?= h($r['TrxID']) ?></div>
+                <?php endif; ?>
+              </td>
+              <td class="px-4 py-3 text-center">
+                <?php if (($r['Status'] ?? '') === 'P'): ?>
+                <div class="flex items-center justify-center gap-1">
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Setujui transaksi pulsa ini?')">
+                    <input type="hidden" name="table" value="<?= h($tbl) ?>">
+                    <input type="hidden" name="pk" value="ID">
+                    <input type="hidden" name="status_col" value="Status">
+                    <input type="hidden" name="id" value="<?= $r['ID'] ?>">
+                    <input type="hidden" name="action" value="approve">
+                    <input type="hidden" name="back" value="trx_pulsa">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 transition-colors">✓</button>
+                  </form>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Tolak transaksi pulsa ini?')">
+                    <input type="hidden" name="table" value="<?= h($tbl) ?>">
+                    <input type="hidden" name="pk" value="ID">
+                    <input type="hidden" name="status_col" value="Status">
+                    <input type="hidden" name="id" value="<?= $r['ID'] ?>">
+                    <input type="hidden" name="action" value="reject">
+                    <input type="hidden" name="back" value="trx_pulsa">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-300 transition-colors">✕</button>
+                  </form>
+                </div>
+                <?php else: ?>
+                <span class="text-slate-300 text-xs">—</span>
                 <?php endif; ?>
               </td>
             </tr>
@@ -3066,11 +3401,12 @@ function renderTrxQrisPage(array $rows, int $total, int $page_n, int $totalPages
               <th class="px-4 py-3 text-center">Status</th>
               <th class="px-4 py-3 text-left">Tgl Transaksi</th>
               <th class="px-4 py-3 text-left">Dibuat</th>
+              <th class="px-4 py-3 text-center">Aksi</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
             <?php if (empty($rows)): ?>
-            <tr><td colspan="8" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada transaksi QRIS.</td></tr>
+            <tr><td colspan="9" class="px-4 py-10 text-center text-slate-400 italic">Tidak ada transaksi QRIS.</td></tr>
             <?php else: foreach ($rows as $r): ?>
             <tr class="hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
               <td class="px-4 py-3 font-mono text-xs text-slate-400">#<?= $r['id'] ?></td>
@@ -3084,6 +3420,28 @@ function renderTrxQrisPage(array $rows, int $total, int $page_n, int $totalPages
               <td class="px-4 py-3 text-center"><?= statusBadge((string)($r['status'] ?? '')) ?></td>
               <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= $r['transaction_date'] ? h(substr((string)$r['transaction_date'], 0, 16)) : '—' ?></td>
               <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap"><?= $r['created_at'] ? h(substr((string)$r['created_at'], 0, 16)) : '—' ?></td>
+              <td class="px-4 py-3 text-center">
+                <?php if (in_array((string)($r['status'] ?? ''), ['PENDING','P','pending'])): ?>
+                <div class="flex items-center justify-center gap-1">
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Setujui transaksi QRIS ini?')">
+                    <input type="hidden" name="table" value="qris_transactions">
+                    <input type="hidden" name="id" value="<?= $r['id'] ?>">
+                    <input type="hidden" name="action" value="approve">
+                    <input type="hidden" name="back" value="trx_qris">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-300 transition-colors">✓</button>
+                  </form>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Tolak transaksi QRIS ini?')">
+                    <input type="hidden" name="table" value="qris_transactions">
+                    <input type="hidden" name="id" value="<?= $r['id'] ?>">
+                    <input type="hidden" name="action" value="reject">
+                    <input type="hidden" name="back" value="trx_qris">
+                    <button type="submit" class="text-xs px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-300 transition-colors">✕</button>
+                  </form>
+                </div>
+                <?php else: ?>
+                <span class="text-slate-300 text-xs">—</span>
+                <?php endif; ?>
+              </td>
             </tr>
             <?php endforeach; endif; ?>
           </tbody>
@@ -3091,5 +3449,394 @@ function renderTrxQrisPage(array $rows, int $total, int $page_n, int $totalPages
       </div>
       <?php renderPagination($page_n, $totalPages, $qBase); ?>
     </div>
+    <?php
+}
+
+// ─── RENDER: BUAT TRANSAKSI ───────────────────────────────────────────
+function renderTrxCreatePage(string $activeType, string $error, string $success): void {
+    $types = [
+        'danamon' => ['label'=>'Transfer Bank (Danamon)', 'icon'=>'M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4'],
+        'dwallet' => ['label'=>'D-Wallet',                'icon'=>'M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z'],
+        'qris'    => ['label'=>'QRIS',                    'icon'=>'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01'],
+    ];
+    ?>
+    <div class="max-w-3xl mx-auto">
+      <!-- Header -->
+      <div class="mb-6">
+        <h1 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          Buat Transaksi Baru
+        </h1>
+        <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">Isi formulir di bawah untuk membuat transaksi baru. Transaksi akan berstatus <strong>PENDING</strong> hingga disetujui.</p>
+      </div>
+
+      <!-- Alert -->
+      <?php if ($error): ?>
+      <div class="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 text-red-700 dark:text-red-300 text-sm flex items-start gap-2">
+        <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <span><?= h($error) ?></span>
+      </div>
+      <?php elseif ($success): ?>
+      <div class="mb-4 p-3 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 text-green-700 dark:text-green-300 text-sm flex items-start gap-2">
+        <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <span><?= $success ?></span>
+      </div>
+      <?php endif; ?>
+
+      <!-- Tab Selector -->
+      <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm mb-6">
+        <div class="flex border-b border-slate-200 dark:border-gray-700 overflow-x-auto">
+          <?php foreach ($types as $key => $t): ?>
+          <a href="?page=trx_create&type=<?= $key ?>"
+             class="flex items-center gap-2 px-5 py-3.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 <?= $activeType === $key ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400' : 'border-transparent text-slate-500 hover:text-slate-700 dark:hover:text-slate-300' ?>">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="<?= h($t['icon']) ?>"/>
+            </svg>
+            <?= h($t['label']) ?>
+          </a>
+          <?php endforeach; ?>
+        </div>
+
+        <div class="p-6">
+          <?php if ($activeType === 'danamon'): ?>
+          <!-- ── Danamon Form ── -->
+          <form method="POST" action="?page=trx_create" class="space-y-5">
+            <input type="hidden" name="trx_type" value="danamon">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Tipe Protokol <span class="text-red-500">*</span></label>
+                <select name="protocol" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                  <option value="INQUIRY">INQUIRY</option>
+                  <option value="TRANSFER_INTRA">TRANSFER_INTRA</option>
+                  <option value="TRANSFER_INTER">TRANSFER_INTER</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Rekening Asal <span class="text-red-500">*</span></label>
+                <input type="text" name="source_account" required placeholder="cth: 003558900266"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Rekening Tujuan</label>
+                <input type="text" name="destination_account" placeholder="cth: 003600350346"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nominal (Rp)</label>
+                <input type="number" name="amount" min="0" step="100" placeholder="0"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Referensi No</label>
+                <input type="text" name="ref_no" placeholder="Biarkan kosong untuk auto-generate"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Keterangan</label>
+                <input type="text" name="remark" placeholder="Keterangan transfer"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+            </div>
+            <div class="flex items-center gap-3 pt-2 border-t border-slate-100 dark:border-gray-700">
+              <button type="submit" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                Buat Transaksi Bank
+              </button>
+              <a href="?page=trx_danamon" class="px-4 py-2.5 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium transition-colors">Lihat Daftar</a>
+            </div>
+          </form>
+
+          <?php elseif ($activeType === 'dwallet'): ?>
+          <!-- ── D-Wallet Form ── -->
+          <form method="POST" action="?page=trx_create" class="space-y-5">
+            <input type="hidden" name="trx_type" value="dwallet">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Jenis Transaksi <span class="text-red-500">*</span></label>
+                <select name="jenis" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                  <option value="CASHIN">CASHIN</option>
+                  <option value="CASHOUT">CASHOUT</option>
+                  <option value="TRANSFER">TRANSFER</option>
+                  <option value="PAYMENT">PAYMENT</option>
+                  <option value="REFUND">REFUND</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nominal (Rp) <span class="text-red-500">*</span></label>
+                <input type="number" name="amount" min="1" step="100" required placeholder="10000"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Pengirim</label>
+                <input type="text" name="kode_sender" placeholder="cth: A-000255"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Penerima</label>
+                <input type="text" name="kode_receiver" placeholder="cth: A-000234"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Biaya / Fee (Rp)</label>
+                <input type="number" name="fee" min="0" step="100" placeholder="0"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Keterangan</label>
+                <input type="text" name="keterangan" placeholder="Keterangan transaksi"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+            </div>
+            <div class="flex items-center gap-3 pt-2 border-t border-slate-100 dark:border-gray-700">
+              <button type="submit" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg transition-colors flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                Buat Transaksi D-Wallet
+              </button>
+              <a href="?page=trx_dwallet" class="px-4 py-2.5 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium transition-colors">Lihat Daftar</a>
+            </div>
+          </form>
+
+          <?php elseif ($activeType === 'qris'): ?>
+          <!-- ── QRIS Form ── -->
+          <form method="POST" action="?page=trx_create" class="space-y-5">
+            <input type="hidden" name="trx_type" value="qris">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Merchant ID <span class="text-red-500">*</span></label>
+                <input type="text" name="merchant_id" required placeholder="cth: MCHT001"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Terminal ID</label>
+                <input type="text" name="terminal_id" placeholder="cth: TRM001"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nominal (Rp) <span class="text-red-500">*</span></label>
+                <input type="number" name="amount" min="1" step="100" required placeholder="50000"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Mata Uang</label>
+                <select name="amount_currency" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                  <option value="IDR">IDR</option>
+                  <option value="USD">USD</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">External ID</label>
+                <input type="text" name="external_id" placeholder="Biarkan kosong untuk auto-generate"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Reference No</label>
+                <input type="text" name="reference_no" placeholder="Biarkan kosong untuk auto-generate"
+                  class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+              </div>
+            </div>
+            <div class="flex items-center gap-3 pt-2 border-t border-slate-100 dark:border-gray-700">
+              <button type="submit" class="px-5 py-2.5 bg-orange-600 hover:bg-orange-700 text-white text-sm font-semibold rounded-lg transition-colors flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                Buat Transaksi QRIS
+              </button>
+              <a href="?page=trx_qris" class="px-4 py-2.5 text-sm text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium transition-colors">Lihat Daftar</a>
+            </div>
+          </form>
+          <?php endif; ?>
+        </div>
+      </div>
+
+      <!-- Quick Links -->
+      <div class="grid grid-cols-3 gap-3">
+        <a href="?page=trx_approve" class="flex flex-col items-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm hover:border-indigo-300 dark:hover:border-indigo-600 transition-all group">
+          <svg class="w-6 h-6 text-green-500 mb-2 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          <span class="text-xs font-medium text-slate-600 dark:text-slate-300">Antrian Persetujuan</span>
+        </a>
+        <a href="?page=trx_danamon" class="flex flex-col items-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm hover:border-indigo-300 dark:hover:border-indigo-600 transition-all group">
+          <svg class="w-6 h-6 text-indigo-500 mb-2 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4"/></svg>
+          <span class="text-xs font-medium text-slate-600 dark:text-slate-300">Riwayat Bank</span>
+        </a>
+        <a href="?page=trx_dwallet" class="flex flex-col items-center p-4 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm hover:border-indigo-300 dark:hover:border-indigo-600 transition-all group">
+          <svg class="w-6 h-6 text-blue-500 mb-2 group-hover:scale-110 transition-transform" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/></svg>
+          <span class="text-xs font-medium text-slate-600 dark:text-slate-300">Riwayat D-Wallet</span>
+        </a>
+      </div>
+    </div>
+    <?php
+}
+
+// ─── RENDER: ANTRIAN PERSETUJUAN ──────────────────────────────────────
+function renderTrxApprovePage(array $pendingDanamon, array $pendingDwallet, array $pendingQris, array $pulsaPending, int $totalPending): void {
+    ?>
+    <!-- Header -->
+    <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          Antrian Persetujuan Transaksi
+        </h1>
+        <p class="text-sm text-slate-500 dark:text-slate-400 mt-1">
+          <?php if ($totalPending === 0): ?>
+            Semua transaksi sudah diproses. Tidak ada yang menunggu persetujuan.
+          <?php else: ?>
+            Terdapat <strong class="text-amber-600"><?= $totalPending ?></strong> transaksi menunggu persetujuan.
+          <?php endif; ?>
+        </p>
+      </div>
+      <div class="flex gap-2">
+        <a href="?page=trx_create" class="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-lg transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          Buat Transaksi
+        </a>
+        <a href="?page=trx_approve" class="flex items-center gap-1 px-3 py-2 border border-slate-200 dark:border-gray-600 text-slate-600 dark:text-slate-300 text-sm rounded-lg hover:bg-slate-50 dark:hover:bg-gray-750 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          Refresh
+        </a>
+      </div>
+    </div>
+
+    <?php if ($totalPending === 0): ?>
+    <div class="bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm p-12 text-center">
+      <svg class="w-12 h-12 text-green-400 mx-auto mb-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg>
+      <p class="text-slate-500 dark:text-slate-400 text-sm">Tidak ada transaksi yang menunggu persetujuan saat ini.</p>
+    </div>
+    <?php else: ?>
+
+    <?php
+    // Helper render approval table
+    $renderApprovalTable = function(string $title, string $tableId, array $rows, string $dbTable, string $pkField, string $backPage, string $colorClass, string $iconPath) {
+        if (empty($rows)) return;
+        ?>
+    <div class="mb-6 bg-white dark:bg-gray-800 rounded-xl border border-slate-200 dark:border-gray-700 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-gray-700 bg-slate-50 dark:bg-gray-750">
+        <div class="flex items-center gap-2">
+          <svg class="w-4 h-4 <?= $colorClass ?>" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="<?= h($iconPath) ?>"/>
+          </svg>
+          <h2 class="text-sm font-bold text-slate-700 dark:text-slate-200"><?= h($title) ?></h2>
+          <span class="px-2 py-0.5 text-xs font-bold rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"><?= count($rows) ?></span>
+        </div>
+        <!-- Bulk approve all -->
+        <form method="POST" action="?page=trx_approve" onsubmit="return confirm('Setujui SEMUA transaksi <?= h($title) ?> yang pending?')" class="flex gap-2">
+          <?php foreach ($rows as $r): ?>
+          <input type="hidden" name="bulk_ids[]" value="<?= (int)$r['trx_id'] ?>">
+          <?php endforeach; ?>
+          <input type="hidden" name="table" value="<?= h($dbTable) ?>">
+          <input type="hidden" name="pk" value="<?= h($pkField) ?>">
+          <input type="hidden" name="bulk_action" value="approve">
+          <input type="hidden" name="back" value="trx_approve">
+          <button type="submit" class="text-xs px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium transition-colors">
+            ✓ Setujui Semua
+          </button>
+        </form>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200 dark:border-gray-700">
+              <th class="px-4 py-3 text-left">ID</th>
+              <th class="px-4 py-3 text-left">Faktur / Ref</th>
+              <th class="px-4 py-3 text-left">Info</th>
+              <th class="px-4 py-3 text-left">Asal → Tujuan</th>
+              <th class="px-4 py-3 text-right">Nominal</th>
+              <th class="px-4 py-3 text-left">Waktu</th>
+              <th class="px-4 py-3 text-center">Aksi</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 dark:divide-gray-700">
+            <?php foreach ($rows as $r): ?>
+            <tr class="hover:bg-amber-50 dark:hover:bg-amber-900/10 transition-colors">
+              <td class="px-4 py-3 font-mono text-xs text-slate-400">#<?= (int)$r['trx_id'] ?></td>
+              <td class="px-4 py-3 font-mono text-xs text-blue-600 dark:text-blue-400 max-w-[140px] truncate" title="<?= h((string)($r['faktur'] ?? '')) ?>"><?= h((string)($r['faktur'] ?? '—')) ?></td>
+              <td class="px-4 py-3">
+                <span class="px-2 py-0.5 text-xs rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 font-medium"><?= h((string)($r['info'] ?? '—')) ?></span>
+              </td>
+              <td class="px-4 py-3 text-xs text-slate-500">
+                <?php $src = (string)($r['src'] ?? ''); $dst = (string)($r['dst'] ?? ''); ?>
+                <?= $src ? h($src) : '<span class="text-slate-300">—</span>' ?>
+                <?php if ($dst): ?><span class="mx-1 text-slate-300">→</span><?= h($dst) ?><?php endif; ?>
+              </td>
+              <td class="px-4 py-3 text-right font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">
+                <?= ($r['amount'] ?? 0) > 0 ? rupiah((float)$r['amount']) : '<span class="text-slate-400">—</span>' ?>
+              </td>
+              <td class="px-4 py-3 text-xs text-slate-400 whitespace-nowrap">
+                <?php
+                $ts = $r['ts'] ?? null;
+                if (is_numeric($ts) && $ts > 1000000000) {
+                    echo date('d/m/Y H:i', (int)$ts);
+                } elseif ($ts) {
+                    echo h(substr((string)$ts, 0, 16));
+                } else {
+                    echo '—';
+                }
+                ?>
+              </td>
+              <td class="px-4 py-3 text-center">
+                <div class="flex items-center justify-center gap-1">
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Setujui transaksi #<?= (int)$r['trx_id'] ?>?')">
+                    <input type="hidden" name="table" value="<?= h($dbTable) ?>">
+                    <input type="hidden" name="pk" value="<?= h($pkField) ?>">
+                    <input type="hidden" name="id" value="<?= (int)$r['trx_id'] ?>">
+                    <input type="hidden" name="action" value="approve">
+                    <input type="hidden" name="back" value="<?= h($backPage) ?>">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-green-100 text-green-700 hover:bg-green-600 hover:text-white dark:bg-green-900/30 dark:text-green-300 dark:hover:bg-green-600 dark:hover:text-white transition-colors">
+                      ✓ Setuju
+                    </button>
+                  </form>
+                  <form method="POST" action="?page=trx_approve" class="inline" onsubmit="return confirm('Tolak transaksi #<?= (int)$r['trx_id'] ?>?')">
+                    <input type="hidden" name="table" value="<?= h($dbTable) ?>">
+                    <input type="hidden" name="pk" value="<?= h($pkField) ?>">
+                    <input type="hidden" name="id" value="<?= (int)$r['trx_id'] ?>">
+                    <input type="hidden" name="action" value="reject">
+                    <input type="hidden" name="back" value="<?= h($backPage) ?>">
+                    <button type="submit" class="px-3 py-1.5 text-xs font-semibold rounded-lg bg-red-100 text-red-700 hover:bg-red-600 hover:text-white dark:bg-red-900/30 dark:text-red-300 dark:hover:bg-red-600 dark:hover:text-white transition-colors">
+                      ✕ Tolak
+                    </button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <?php
+    };
+
+    $renderApprovalTable('Transaksi Bank (Danamon)', 'danamon', $pendingDanamon,
+        'danamon_transactions', 'id', 'trx_danamon',
+        'text-indigo-600', 'M8 14v3m4-3v3m4-3v3M3 21h18M3 10h18M3 7l9-4 9 4');
+
+    $renderApprovalTable('D-Wallet', 'dwallet', $pendingDwallet,
+        'dwallet_transactions', 'id', 'trx_dwallet',
+        'text-blue-600', 'M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z');
+
+    $renderApprovalTable('Transaksi QRIS', 'qris', $pendingQris,
+        'qris_transactions', 'id', 'trx_qris',
+        'text-orange-600', 'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01');
+
+    // Pulsa: group by table name
+    if (!empty($pulsaPending)):
+        $byTable = [];
+        foreach ($pulsaPending as $r) {
+            $t = $r['_table'];
+            $byTable[$t][] = $r;
+        }
+        foreach ($byTable as $tbl => $tRows):
+            $yr = substr($tbl, -4);
+            $renderApprovalTable("Penjualan Pulsa {$yr}", "pulsa_{$yr}", $tRows,
+                $tbl, 'ID', 'trx_pulsa',
+                'text-purple-600', 'M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z');
+        endforeach;
+    endif;
+    ?>
+    <?php endif; ?>
     <?php
 }
