@@ -1537,12 +1537,12 @@ function handleTrxApprove(): void {
                         $count++;
                     } catch (PDOException) {}
                 }
-                setFlash('success', "{$count} transaksi berhasil disetujui secara massal.");
+                flash('success', "{$count} transaksi berhasil disetujui secara massal.");
                 logActivity('trx_approve', ['action'=>'bulk_approve','table'=>$table,'count'=>$count]);
                 redirect("?page={$back}");
                 return;
             }
-            setFlash('error', 'Parameter tidak valid.');
+            flash('error', 'Parameter tidak valid.');
             redirect("?page={$back}");
             return;
         }
@@ -1555,14 +1555,14 @@ function handleTrxApprove(): void {
         // Cek record ada dan masih PENDING
         $row = DB::row("SELECT * FROM `{$table}` WHERE `{$pkCol}` = ?", [$id]);
         if (!$row) {
-            setFlash('error', 'Transaksi tidak ditemukan.');
+            flash('error', 'Transaksi tidak ditemukan.');
             redirect("?page={$back}");
             return;
         }
         $curStatus = (string)($row[$stCol] ?? '');
         $pendingStates = ['PENDING','P','pending'];
         if (!in_array($curStatus, $pendingStates)) {
-            setFlash('warning', "Transaksi sudah diproses sebelumnya (status: {$curStatus}).");
+            flash('warning', "Transaksi sudah diproses sebelumnya (status: {$curStatus}).");
             redirect("?page={$back}");
             return;
         }
@@ -1582,10 +1582,10 @@ function handleTrxApprove(): void {
         try {
             DB::exec($sql, $params);
             $label = $action === 'approve' ? 'disetujui' : 'ditolak';
-            setFlash('success', "Transaksi #{$id} berhasil {$label}.");
+            flash('success', "Transaksi #{$id} berhasil {$label}.");
             logActivity('trx_approve', ['table'=>$table,'id'=>$id,'action'=>$label,'new_status'=>$newStatus]);
         } catch (PDOException $e) {
-            setFlash('error', 'Gagal update: ' . $e->getMessage());
+            flash('error', 'Gagal update: ' . $e->getMessage());
         }
 
         redirect("?page={$back}");
