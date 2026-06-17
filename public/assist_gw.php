@@ -3,13 +3,16 @@
  * =====================================================================
  * ASSIST GATEWAY v2 — Single-File Production App
  * =====================================================================
- * Fitur lengkap: Login, Dashboard, Manajemen User, Customer, 
+ * Fitur lengkap: Login, Dashboard, Manajemen User, Customer,
  * Template Notifikasi, Activity Log, Settings, dan API Key Manager
- * 
+ *
  * Cara pakai:
  *  1. Upload file ini ke server PHP (7.4+)
- *  2. Buka di browser → ikuti wizard instalasi
- *  3. Login dengan admin / admin123
+ *  2. Pastikan database MySQL sudah tersedia & tabel sudah ada
+ *  3. Buka di browser → langsung login
+ *
+ * Database : MySQL 10.1.11.21 / assist_gw
+ * User     : AssistGateway
  * =====================================================================
  */
 
@@ -69,197 +72,51 @@ class DB {
     }
 }
 
-// ─── INSTALASI DATABASE ─────────────────────────────────────────────
-function setupDatabase(): void {
-    $db = DB::get();
-
-    // Tabel: user (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `user` (
-        `id` int unsigned NOT NULL AUTO_INCREMENT,
-        `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `username` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `role` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'user',
-        `password` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `theme` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'auto',
-        `status` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'active',
-        `reset_token` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `last_login_at` int unsigned NOT NULL DEFAULT '0',
-        `reset_token_expires_at` int unsigned NOT NULL DEFAULT '0',
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        `updated_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`id`),
-        UNIQUE KEY `idx_username_unique` (`username`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: customer (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `customer` (
-        `id` int unsigned NOT NULL AUTO_INCREMENT,
-        `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `tenant` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `address` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-        `phone` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `email` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `api_token` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `status` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'active',
-        `use_custom_webhook` tinyint(1) NOT NULL DEFAULT '0',
-        `custom_webhook_url` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-        `custom_webhook_token` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-        `custom_webhook_services` json DEFAULT NULL,
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        `updated_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`id`),
-        UNIQUE KEY `idx_tenant_unique` (`tenant`),
-        UNIQUE KEY `idx_api_token_unique` (`api_token`),
-        KEY `idx_email` (`email`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: template (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `template` (
-        `id` int unsigned NOT NULL AUTO_INCREMENT,
-        `template_code` varchar(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `subject` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `protocol` varchar(30) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `priority` enum('high','middle','low') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'middle',
-        `body` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `ttl` int unsigned NOT NULL DEFAULT '0',
-        `parse_mode` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        `updated_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`id`),
-        UNIQUE KEY `idx_protocol_template_code_unique` (`protocol`,`template_code`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: activity_log (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `activity_log` (
-        `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-        `action` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `user_id` int unsigned DEFAULT NULL,
-        `payload` json DEFAULT NULL,
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`id`),
-        KEY `idx_action_created_at` (`action`,`created_at`),
-        KEY `idx_user_id` (`user_id`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: setting (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `setting` (
-        `setting_key` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `setting_value` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        `updated_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`setting_key`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: message_stats (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `message_stats` (
-        `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-        `timestamp` int unsigned NOT NULL DEFAULT '0',
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        `protocol` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'queued',
-        `recipient` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `template_name` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `kode_persetujuan` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `kode_aktivasi` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `message_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `duration_seconds` decimal(10,4) DEFAULT NULL,
-        `error_message` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-        `retry_count` int unsigned NOT NULL DEFAULT '0',
-        `worker_id` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `sender_account` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `customer_id` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `module` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `approval_notes` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-        `approval_timestamp` int unsigned NOT NULL DEFAULT '0',
-        `approval_access_timestamp` int unsigned NOT NULL DEFAULT '0',
-        `approval_access_ip` varchar(45) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `approval_access_device` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `event_data` json DEFAULT NULL,
-        `login_ip` varchar(45) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `login_device` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `login_time` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `approval_device_info` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        PRIMARY KEY (`id`),
-        KEY `idx_timestamp` (`timestamp`),
-        KEY `idx_customer_id` (`customer_id`),
-        KEY `idx_protocol` (`protocol`),
-        KEY `idx_module` (`module`),
-        KEY `idx_kode_persetujuan` (`kode_persetujuan`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: security_keys — RSA Key Manager (tabel khusus app ini)
-    $db->exec("CREATE TABLE IF NOT EXISTS `security_keys` (
-        `id` int unsigned NOT NULL AUTO_INCREMENT,
-        `identifier` varchar(100) NOT NULL,
-        `description` text DEFAULT NULL,
-        `public_key` text NOT NULL,
-        `private_key` text NOT NULL,
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`id`),
-        UNIQUE KEY `identifier` (`identifier`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: user_role (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `user_role` (
-        `id` int unsigned NOT NULL AUTO_INCREMENT,
-        `name` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
-        `slug` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
-        `description` text COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        `updated_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`id`),
-        UNIQUE KEY `idx_role_slug_unique` (`slug`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Tabel: scheduled_task (sesuai schema production)
-    $db->exec("CREATE TABLE IF NOT EXISTS `scheduled_task` (
-        `id` int unsigned NOT NULL AUTO_INCREMENT,
-        `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `job_class` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `cron_expression` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-        `status` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'active',
-        `is_running` tinyint(1) NOT NULL DEFAULT '0',
-        `last_run_at` int unsigned NOT NULL DEFAULT '0',
-        `next_run_at` int unsigned NOT NULL DEFAULT '0',
-        `created_at` int unsigned NOT NULL DEFAULT '0',
-        `updated_at` int unsigned NOT NULL DEFAULT '0',
-        PRIMARY KEY (`id`),
-        KEY `idx_task_scheduling` (`status`,`next_run_at`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // ── Seed: default admin user ──────────────────────────────────────
-    $adminExists = DB::row("SELECT id FROM `user` WHERE username='admin'");
-    if (!$adminExists) {
-        DB::exec("INSERT INTO `user` (name,username,password,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
-            ['Administrator', 'admin', password_hash('admin123', PASSWORD_DEFAULT), 'admin', 'active', time(), time()]);
-    }
-
-    // ── Seed: default settings ────────────────────────────────────────
-    $defaults = [
-        'app_name'        => 'Assist Gateway',
-        'theme'           => 'light',
-        'timezone'        => 'Asia/Jakarta',
-        'smtp_host'       => '',
-        'smtp_port'       => '587',
-        'smtp_user'       => '',
-        'smtp_pass'       => '',
-        'smtp_from'       => '',
-        'telegram_token'  => '',
-        'telegram_chatid' => '',
-    ];
-    foreach ($defaults as $k => $v) {
-        DB::exec("INSERT IGNORE INTO `setting` (setting_key,setting_value,created_at,updated_at) VALUES (?,?,?,?)", [$k, $v, time(), time()]);
-    }
-
-    // ── Seed: default roles ───────────────────────────────────────────
-    $roles = [
-        ['Administrator', 'admin',     'Akses penuh ke semua fitur'],
-        ['Operator',      'operator',  'Akses terbatas operasional'],
-        ['User',          'user',      'Akses dasar'],
-    ];
-    foreach ($roles as [$n, $s, $d]) {
-        DB::exec("INSERT IGNORE INTO `user_role` (name,slug,description,created_at,updated_at) VALUES (?,?,?,?,?)", [$n, $s, $d, time(), time()]);
+// ─── CEK KONEKSI DATABASE ───────────────────────────────────────────
+// Database & tabel sudah ada di server MySQL — tidak perlu instalasi.
+// Fungsi ini hanya memverifikasi koneksi berhasil; jika gagal tampilkan
+// halaman error yang jelas agar mudah di-debug.
+function checkDbConnection(): void {
+    try {
+        DB::get(); // Coba buka koneksi
+    } catch (PDOException $e) {
+        $host = DB_HOST;
+        $db   = DB_NAME;
+        $user = DB_USER;
+        $msg  = htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8');
+        http_response_code(503);
+        echo <<<HTML
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Database Error — Assist Gateway</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen flex items-center justify-center p-4">
+  <div class="bg-white rounded-2xl shadow-lg border border-red-100 max-w-lg w-full p-8">
+    <div class="flex items-center gap-3 mb-4">
+      <div class="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+        <svg class="w-5 h-5 text-red-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+        </svg>
+      </div>
+      <h1 class="text-lg font-bold text-red-700">Koneksi Database Gagal</h1>
+    </div>
+    <p class="text-sm text-gray-600 mb-4">Aplikasi tidak dapat terhubung ke server MySQL. Periksa konfigurasi berikut:</p>
+    <div class="bg-gray-50 rounded-lg p-4 text-sm font-mono space-y-1 mb-4">
+      <div><span class="text-gray-400">Host :</span> <span class="text-gray-800">{$host}</span></div>
+      <div><span class="text-gray-400">Database :</span> <span class="text-gray-800">{$db}</span></div>
+      <div><span class="text-gray-400">Username :</span> <span class="text-gray-800">{$user}</span></div>
+    </div>
+    <div class="bg-red-50 rounded-lg p-3 text-xs text-red-700 font-mono break-all">{$msg}</div>
+    <p class="mt-4 text-xs text-gray-400">Pastikan server MySQL aktif, host dapat dijangkau, dan user memiliki akses ke database.</p>
+  </div>
+</body>
+</html>
+HTML;
+        exit;
     }
 }
 
@@ -334,7 +191,7 @@ function isAjax(): bool {
 }
 
 // ─── ROUTING ────────────────────────────────────────────────────────
-setupDatabase();
+checkDbConnection(); // Verifikasi koneksi MySQL — tidak install tabel
 
 $page   = $_GET['page']   ?? 'home';
 $action = $_GET['action'] ?? '';
