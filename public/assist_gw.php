@@ -1396,14 +1396,19 @@ function handleTrxCreate(): void {
                     $sender        = trim($_POST['Sender']         ?? '');
                     $jenisTrxBayar = trim($_POST['Jenis']          ?? 'P');
                     // Kolom khusus transfer (RekTujuanTFDana / PAYBIFAST / PAYTFDANA)
-                    $rekTujuan     = trim($_POST['RekTujuanTFDana']   ?? '');
-                    $bankTujuan    = trim($_POST['BankTujuanTFDana']  ?? '');
-                    $namaTujuan    = trim($_POST['NamaTujuanTFDana']  ?? '');
+                    $rekTujuan       = trim($_POST['RekTujuanTFDana']      ?? '');
+                    $bankTujuan      = trim($_POST['BankTujuanTFDana']     ?? '');
+                    $bankNamaTujuan  = trim($_POST['BankNamaTujuanTFDana'] ?? '');
+                    $namaTujuan      = trim($_POST['NamaTujuanTFDana']     ?? '');
+                    $sourceAccNo     = trim($_POST['SourceAccountNo']      ?? '');
+                    $transferDesc    = trim($_POST['TransferDescription']  ?? '');
+                    $trxPurposeCode  = trim($_POST['TrxPurposeCode']       ?? '99');
+                    $trxType         = trim($_POST['TrxType']              ?? '02');
                     // Nomor dokumen
-                    $nomor         = trim($_POST['Nomor']          ?? '');
-                    $seri          = trim($_POST['Seri']           ?? '');
-                    $idtrxOrder    = trim($_POST['IDTRXOrder']     ?? '');
-                    $keterangan    = trim($_POST['keterangan_pulsa'] ?? '');
+                    $nomor           = trim($_POST['Nomor']                ?? '');
+                    $seri            = trim($_POST['Seri']                 ?? '');
+                    $idtrxOrder      = trim($_POST['IDTRXOrder']           ?? '');
+                    $keterangan      = trim($_POST['keterangan_pulsa']     ?? '');
                     $tgl           = trim($_POST['Tgl']            ?? date('Y-m-d'));
 
                     if (!$hp) throw new RuntimeException('Nomor HP Tujuan wajib diisi.');
@@ -1420,21 +1425,46 @@ function handleTrxCreate(): void {
                         $nomor = 'SL0' . substr(md5(uniqid('', true)), 0, 6);
                     }
 
-                    // Build req_payload (TRXOrder) sesuai format real
+                    // Build TRXOrder dalam format SNAP API (Danamon BiF)
+                    $partnerRefNo   = $idtrxOrder ?: $nomor;
+                    $amountVal      = number_format($hjNasabah, 2, '.', '');
+                    $txDate         = date('Y-m-d\TH:i:sP');
+                    // transferDescription: gunakan field khusus, fallback ke idtrxOrder + '-'
+                    $txDesc         = $transferDesc ?: ($idtrxOrder ? $idtrxOrder . '-' : '');
+
                     $trxOrderPayload = json_encode([
-                        'KodeCustomer'     => $kodeCustomer,
-                        'JenisTrx'         => $jenisTrx,
-                        'Kode'             => $kode,
-                        'HP'               => $hp,
-                        'HJ_Nasabah'       => $hjNasabah,
-                        'HJ'               => $hj,
-                        'HB'               => $hb,
-                        'Supplier'         => $supplier,
-                        'RekTujuanTFDana'  => $rekTujuan,
-                        'BankTujuanTFDana' => $bankTujuan,
-                        'NamaTujuanTFDana' => $namaTujuan,
-                        'keterangan'       => $keterangan,
-                    ], JSON_UNESCAPED_UNICODE);
+                        'partnerReferenceNo'   => $partnerRefNo,
+                        'amount'               => ['value' => $amountVal, 'currency' => 'IDR'],
+                        'beneficiaryAccountName' => $namaTujuan,
+                        'beneficiaryAccountNo'   => $rekTujuan,
+                        'beneficiaryBankCode'    => $bankTujuan,
+                        'beneficiaryBankName'    => $bankNamaTujuan,
+                        'sourceAccountNo'        => $sourceAccNo,
+                        'transactionDate'        => $txDate,
+                        'additionalInfo'         => [
+                            'transferDescription' => $txDesc,
+                            'trxPurposeCode'      => $trxPurposeCode ?: '99',
+                            'trxType'             => $trxType ?: '02',
+                        ],
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+
+                    // Build TRXOrderResponse skeleton (PENDING — akan diisi saat eksekusi ke Danamon)
+                    $trxOrderResponse = json_encode([
+                        'responseCode'         => '',
+                        'responseMessage'      => 'PENDING',
+                        'referenceNo'          => '',
+                        'partnerReferenceNo'   => $partnerRefNo,
+                        'amount'               => ['value' => $amountVal, 'currency' => 'IDR'],
+                        'beneficiaryAccountNo' => $rekTujuan,
+                        'beneficiaryBankCode'  => $bankTujuan,
+                        'sourceAccountNo'      => $sourceAccNo,
+                        'additionalInfo'       => [
+                            'transferDescription' => $txDesc,
+                            'trxPurposeCode'      => $trxPurposeCode ?: '99',
+                            'bifReferenceNo'      => '',
+                            'transactionDate'     => $txDate,
+                        ],
+                    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 
                     DB::exec(
                         "INSERT INTO `{$tblPulsa}`
@@ -1458,7 +1488,7 @@ function handleTrxCreate(): void {
                             '', $nowTs, 0, $protocol, '', $sender ?: '',
                             '0', '0', 0, '', $nowTs,
                             '', '', $idtrxOrder ?: '', 0, '0', '',
-                            $trxOrderPayload, '', '',
+                            $trxOrderPayload, $trxOrderResponse, '',
                             '', '', '', '', '',
                             '', '', '',
                             '', '', '', '',
@@ -4157,19 +4187,51 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
               </h3>
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">No. Rekening Tujuan</label>
-                  <input type="text" name="RekTujuanTFDana" placeholder="cth: 616401010159530"
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">No. Rekening Tujuan <span class="text-red-400">*</span></label>
+                  <input type="text" name="RekTujuanTFDana" placeholder="cth: 614701019064534"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                 </div>
                 <div>
-                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Bank Tujuan</label>
-                  <input type="text" name="BankTujuanTFDana" placeholder="cth: BRINIDJA, 002, 014"
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Bank Tujuan <span class="text-red-400">*</span></label>
+                  <input type="text" name="BankTujuanTFDana" placeholder="cth: BRINIDJA, 008, 014"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                 </div>
                 <div>
-                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nama Pemilik Rekening</label>
-                  <input type="text" name="NamaTujuanTFDana" placeholder="cth: HERI SUWIGNYO"
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nama Bank Tujuan</label>
+                  <input type="text" name="BankNamaTujuanTFDana" placeholder="cth: BANK RAKYAT INDONESIA"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nama Pemilik Rekening <span class="text-red-400">*</span></label>
+                  <input type="text" name="NamaTujuanTFDana" placeholder="cth: AJENG RATMAWATI"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">No. Rekening Sumber <span class="text-red-400">*</span></label>
+                  <input type="text" name="SourceAccountNo" placeholder="cth: 003684883329"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">IDTRXOrder / partnerReferenceNo <span class="text-red-400">*</span></label>
+                  <input type="text" name="IDTRXOrder" placeholder="cth: STPYB202606170000057"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Transfer Description</label>
+                  <input type="text" name="TransferDescription" placeholder="cth: JB012026061700000037-"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Trx Purpose Code</label>
+                  <input type="text" name="TrxPurposeCode" value="99" placeholder="default: 99"
+                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Trx Type</label>
+                  <select name="TrxType" class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                    <option value="02">02 – BiF Transfer (default)</option>
+                    <option value="01">01 – Online Transfer</option>
+                  </select>
                 </div>
               </div>
             </div>
@@ -4181,11 +4243,6 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nomor Surat/Ref</label>
                   <input type="text" name="Nomor" placeholder="Auto-generate jika kosong"
-                    class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
-                </div>
-                <div>
-                  <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">IDTRXOrder</label>
-                  <input type="text" name="IDTRXOrder" placeholder="cth: JB012026061300000050"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                 </div>
                 <div>
