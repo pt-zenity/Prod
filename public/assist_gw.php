@@ -1857,8 +1857,8 @@ function handleTrxApprove(): void {
             'qris_transactions'     => ['pk'=>'id',   'status_col'=>'status',   'approve'=>'SUCCESS', 'reject'=>'FAILED',   'ts_col'=>null,         'ts_type'=>null],
         ];
 
-        // Untuk tabel pulsa_penjualan_*
-        if (preg_match('/^pulsa_penjualan(_\d{4})?$/', $table)) {
+        // Tabel pulsa_penjualan (tanpa suffix tahun)
+        if ($table === 'pulsa_penjualan') {
             $allowedTables[$table] = ['pk'=>'ID', 'status_col'=>'Status', 'approve'=>'S', 'reject'=>'G', 'ts_col'=>'DateTimeClose', 'ts_type'=>'unix'];
         }
 
@@ -2071,31 +2071,18 @@ function handleTrxApprove(): void {
          FROM qris_transactions WHERE status IN ('PENDING','P','pending') ORDER BY id DESC LIMIT 50"
     );
 
-    // Pulsa: gunakan tabel utama pulsa_penjualan
+    // Pulsa: gunakan tabel pulsa_penjualan (tanpa suffix tahun)
     $pulsaPending = [];
     try {
         $tbl = 'pulsa_penjualan';
         $rows = DB::query(
             "SELECT ID AS trx_id, Nomor AS faktur, Kode AS kode, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$tbl}' AS _table
-             FROM `{$tbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 30"
+             FROM `{$tbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 50"
         );
         foreach ($rows as $r) {
             $r['_table'] = $tbl;
             $pulsaPending[] = $r;
         }
-
-        // Cek juga tabel tahun berjalan (pulsa_penjualan_YYYY)
-        $yearTbl = 'pulsa_penjualan_' . date('Y');
-        try {
-            $yearRows = DB::query(
-                "SELECT ID AS trx_id, Nomor AS faktur, Kode AS kode, JenisTrx AS info, KodeCustomer AS src, HP AS dst, HJ_Nasabah AS amount, Status AS status, DateTime AS ts, '{$yearTbl}' AS _table
-                 FROM `{$yearTbl}` WHERE Status = 'P' ORDER BY ID DESC LIMIT 30"
-            );
-            foreach ($yearRows as $r) {
-                $r['_table'] = $yearTbl;
-                $pulsaPending[] = $r;
-            }
-        } catch (PDOException $e) { /* tabel tidak ada, skip */ }
     } catch (PDOException $e) {}
 
     $totalPending = count($pendingDanamon) + count($pendingDwallet) + count($pendingQris) + count($pulsaPending);
