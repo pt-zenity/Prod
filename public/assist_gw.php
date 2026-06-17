@@ -1161,13 +1161,119 @@ function handleApiJson(): void {
                 echo json_encode(['success' => true, 'data' => $merchants]);
                 break;
 
-            // ── Produk Pulsa (distinct Kode dari pulsa_penjualan tahun ini) ──
+            // ── Produk Pulsa (dari stock table, fallback ke pulsa history) ──
             case 'pulsa_products':
-                $tbl  = 'pulsa_penjualan_' . date('Y');
+                $products = [];
+                // Coba dari tabel stock (master produk)
+                try {
+                    $stockRows = DB::query(
+                        "SELECT Kode, KodeProduk, Nama, HB, HJ, Margin, Tipe, Kategori, Status_Aktif
+                         FROM stock
+                         WHERE Status_Aktif IN ('1','A','Y','0') AND Kode IS NOT NULL AND Kode <> ''
+                         ORDER BY Kategori, Kode ASC
+                         LIMIT 500",
+                        []
+                    );
+                    if ($stockRows) {
+                        foreach ($stockRows as $s) {
+                            $products[] = [
+                                'Kode'      => $s['Kode'],
+                                'Nama'      => $s['Nama'] ?? $s['Kode'],
+                                'JenisTrx'  => '', // kosong dari stock, akan di-map
+                                'HB'        => (float)($s['HB'] ?? 0),
+                                'HJ'        => (float)($s['HJ'] ?? 0),
+                                'Kategori'  => $s['Kategori'] ?? '',
+                                'Tipe'      => $s['Tipe'] ?? '',
+                                'src'       => 'stock',
+                            ];
+                        }
+                    }
+                } catch (Throwable $e) { /* tabel stock mungkin kosong */ }
+
+                // Selalu ambil dari history pulsa_penjualan (multi-tahun) untuk JenisTrx yg valid
+                $historyProducts = [];
+                $years = [(int)date('Y'), (int)date('Y')-1, (int)date('Y')-2];
+                foreach ($years as $yr) {
+                    $tbl2 = "pulsa_penjualan_{$yr}";
+                    try {
+                        $hRows = DB::query(
+                            "SELECT Kode, JenisTrx,
+                                    MAX(HB) AS HB, MAX(HJ) AS HJ, MAX(HJ_Nasabah) AS HJ_Nasabah,
+                                    COUNT(*) AS cnt
+                             FROM `{$tbl2}`
+                             WHERE Kode IS NOT NULL AND Kode <> ''
+                             GROUP BY Kode, JenisTrx
+                             ORDER BY Kode ASC
+                             LIMIT 300",
+                            []
+                        );
+                        foreach ($hRows as $h) {
+                            $key = $h['Kode'].'|'.$h['JenisTrx'];
+                            if (!isset($historyProducts[$key])) {
+                                $historyProducts[$key] = [
+                                    'Kode'      => $h['Kode'],
+                                    'Nama'      => $h['Kode'],
+                                    'JenisTrx'  => $h['JenisTrx'] ?? '',
+                                    'HB'        => (float)($h['HB'] ?? 0),
+                                    'HJ'        => (float)($h['HJ'] ?? 0),
+                                    'HJ_Nasabah'=> (float)($h['HJ_Nasabah'] ?? 0),
+                                    'Kategori'  => '',
+                                    'Tipe'      => '',
+                                    'src'       => 'history',
+                                    'cnt'       => (int)($h['cnt'] ?? 0),
+                                ];
+                            } else {
+                                // Update cnt dari tahun lebih baru
+                                $historyProducts[$key]['cnt'] += (int)($h['cnt'] ?? 0);
+                            }
+                        }
+                    } catch (Throwable $e) { /* tabel tahun ini mungkin belum ada */ }
+                }
+
+                // Merge: history products enriched dengan nama dari stock
+                $stockMap = [];
+                foreach ($products as $p) { $stockMap[$p['Kode']] = $p; }
+
+                $merged = [];
+                foreach ($historyProducts as $key => $h) {
+                    $kode = $h['Kode'];
+                    $merged[$key] = [
+                        'Kode'      => $kode,
+                        'Nama'      => isset($stockMap[$kode]) ? $stockMap[$kode]['Nama'] : $kode,
+                        'JenisTrx'  => $h['JenisTrx'],
+                        'HB'        => $h['HB'] > 0 ? $h['HB'] : (isset($stockMap[$kode]) ? $stockMap[$kode]['HB'] : 0),
+                        'HJ'        => $h['HJ'] > 0 ? $h['HJ'] : (isset($stockMap[$kode]) ? $stockMap[$kode]['HJ'] : 0),
+                        'HJ_Nasabah'=> $h['HJ_Nasabah'] ?? 0,
+                        'Kategori'  => isset($stockMap[$kode]) ? $stockMap[$kode]['Kategori'] : '',
+                        'cnt'       => $h['cnt'],
+                        'src'       => 'history',
+                    ];
+                }
+
+                // Tambah produk dari stock yang tidak ada di history
+                foreach ($products as $p) {
+                    $found = false;
+                    foreach ($merged as $m) { if ($m['Kode'] === $p['Kode']) { $found=true; break; } }
+                    if (!$found) {
+                        $merged[$p['Kode'].'|'] = $p;
+                        $merged[$p['Kode'].'|']['JenisTrx'] = '';
+                        $merged[$p['Kode'].'|']['cnt'] = 0;
+                    }
+                }
+
+                // Sort by cnt desc (produk paling sering dipakai di atas)
+                usort($merged, function($a,$b){ return ($b['cnt']??0) - ($a['cnt']??0); });
+
+                echo json_encode(['success' => true, 'data' => array_values($merged)]);
+                break;
+
+            // ── Supplier list (untuk dropdown supplier pulsa) ─────────
+            case 'suppliers':
                 $rows = DB::query(
-                    "SELECT DISTINCT Kode, JenisTrx FROM `{$tbl}`
-                     WHERE Kode IS NOT NULL AND Kode <> ''
-                     ORDER BY Kode ASC LIMIT 300",
+                    "SELECT Kode, Nama FROM supplier
+                     WHERE Status = '1' AND Kode IS NOT NULL AND Kode <> ''
+                     ORDER BY Kode ASC
+                     LIMIT 100",
                     []
                 );
                 echo json_encode(['success' => true, 'data' => $rows]);
@@ -3958,21 +4064,58 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
             <!-- SEKSI 2: Produk & Tujuan -->
             <div>
               <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Produk & Tujuan</h3>
+
+              <!-- Produk Selector -->
+              <div class="mb-4 p-3 bg-purple-50/60 dark:bg-purple-900/10 rounded-lg border border-purple-200 dark:border-purple-700/50">
+                <label class="block text-xs font-semibold text-purple-700 dark:text-purple-300 mb-1.5">
+                  <svg class="w-3.5 h-3.5 inline mr-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+                  Cari &amp; Pilih Produk dari Database
+                </label>
+                <div class="flex gap-2 mb-2">
+                  <input type="text" id="pulsa-prod-search"
+                    placeholder="Ketik kode / nama produk: PAYBIFAST, XL10, PLN, BPJS..."
+                    class="flex-1 px-3 py-2 text-sm border border-purple-300 dark:border-purple-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                  <select id="pulsa-jenist-filter"
+                    class="w-36 px-2 py-2 text-sm border border-purple-300 dark:border-purple-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500">
+                    <option value="">Semua JenisTrx</option>
+                  </select>
+                </div>
+                <select id="pulsa-prod-sel" size="5"
+                  class="w-full text-sm border border-purple-300 dark:border-purple-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500">
+                  <option value="">— Memuat produk... —</option>
+                </select>
+                <div id="pulsa-prod-badge" class="hidden mt-2 p-2 rounded-lg bg-purple-100 dark:bg-purple-800/30 text-xs text-purple-800 dark:text-purple-200 grid grid-cols-2 sm:grid-cols-4 gap-2"></div>
+              </div>
+
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Produk <span class="text-red-500">*</span></label>
-                  <input type="text" name="Kode" required placeholder="cth: PAYBIFAST, PAYTFDANA, XL10"
+                  <input type="text" name="Kode" id="pulsa-kode" required placeholder="cth: PAYBIFAST, PAYTFDANA, XL10"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                  <p id="pulsa-kode-hint" class="text-[10px] text-purple-500 mt-0.5 hidden"></p>
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Jenis Transaksi (JenisTrx) <span class="text-red-500">*</span></label>
-                  <input type="text" name="JenisTrx" required placeholder="cth: 13, PP, PL, TF"
+                  <select name="JenisTrx" id="pulsa-jenist-input"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
-                  <p class="text-[10px] text-slate-400 mt-1">13=Transfer Dana · PP=Pulsa · PL=PLN · TF=Transfer Bank</p>
+                    <option value="">— Pilih atau ketik —</option>
+                    <option value="13">13 – Transfer Dana</option>
+                    <option value="PP">PP – Pulsa</option>
+                    <option value="PL">PL – PLN / Listrik</option>
+                    <option value="TF">TF – Transfer Bank</option>
+                    <option value="BJ">BJ – BPJS</option>
+                    <option value="PD">PD – PDAM</option>
+                    <option value="TK">TK – Telkom</option>
+                    <option value="IN">IN – Internet</option>
+                    <option value="TV">TV – TV Kabel</option>
+                    <option value="FN">FN – Finance / Cicilan</option>
+                    <option value="OD">OD – Open Denom</option>
+                  </select>
+                  <p class="text-[10px] text-slate-400 mt-1">Auto-diisi saat pilih produk dari DB di atas</p>
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Nomor HP Tujuan <span class="text-red-500">*</span></label>
-                  <input type="text" name="HP" required placeholder="cth: 085259070588"
+                  <input type="text" name="HP" id="pulsa-hp" required placeholder="cth: 085259070588"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                 </div>
                 <div>
@@ -3982,8 +4125,10 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Kode Supplier</label>
-                  <input type="text" name="Supplier" value="0024" placeholder="cth: 0024"
+                  <select name="Supplier" id="pulsa-supplier-sel"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
+                    <option value="0024" selected>0024 – SNAP FT BDI</option>
+                  </select>
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">Sender (Agent)</label>
@@ -3999,19 +4144,19 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">HJ Nasabah (Harga Jual) <span class="text-red-500">*</span></label>
-                  <input type="number" name="HJ_Nasabah" min="1" step="100" required placeholder="500000"
+                  <input type="number" name="HJ_Nasabah" id="pulsa-hj-nasabah" min="1" step="100" required placeholder="500000"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                   <p class="text-[10px] text-slate-400 mt-1">Harga jual kepada pelanggan/nasabah</p>
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">HJ (Harga Jual ke Supplier)</label>
-                  <input type="number" name="HJ" min="0" step="100" placeholder="500"
+                  <input type="number" name="HJ" id="pulsa-hj" min="0" step="100" placeholder="500"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                   <p class="text-[10px] text-slate-400 mt-1">Biaya/fee ke supplier</p>
                 </div>
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">HB (Harga Beli)</label>
-                  <input type="number" name="HB" min="0" step="100" placeholder="0"
+                  <input type="number" name="HB" id="pulsa-hb" min="0" step="100" placeholder="0"
                     class="w-full px-3 py-2.5 text-sm border border-slate-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-slate-800 dark:text-slate-200 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500">
                   <p class="text-[10px] text-slate-400 mt-1">Harga beli dari supplier</p>
                 </div>
@@ -4019,8 +4164,11 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
             </div>
 
             <!-- SEKSI 4: Transfer Dana (opsional) -->
-            <div>
-              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Data Transfer Dana <span class="text-slate-300 font-normal normal-case">(isi jika JenisTrx = 13 / PAYBIFAST / PAYTFDANA)</span></h3>
+            <div id="pulsa-seksi-tf">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">
+                Data Transfer Dana
+                <span class="text-slate-300 font-normal normal-case">(otomatis tampil jika JenisTrx = 13 / Kode PAYBIFAST / PAYTFDANA)</span>
+              </h3>
               <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label class="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">No. Rekening Tujuan</label>
@@ -4319,6 +4467,55 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
       var pulsaHpSender = qs('#pulsa-hp-sender');
       var pulsaBadge    = qs('#pulsa-customer-badge');
 
+      /* Produk elements */
+      var pulsaProdSearch  = qs('#pulsa-prod-search');
+      var pulsaJenistFilter= qs('#pulsa-jenist-filter');
+      var pulsaProdSel     = qs('#pulsa-prod-sel');
+      var pulsaProdBadge   = qs('#pulsa-prod-badge');
+      var pulsaKode        = qs('#pulsa-kode');
+      var pulsaKodeHint    = qs('#pulsa-kode-hint');
+      var pulsaJenistInput = qs('#pulsa-jenist-input');
+      var pulsaHjNasabah   = qs('#pulsa-hj-nasabah');
+      var pulsaHj          = qs('#pulsa-hj');
+      var pulsaHb          = qs('#pulsa-hb');
+      var pulsaSeksiTf     = qs('#pulsa-seksi-tf');
+      var pulsaSupplierSel = qs('#pulsa-supplier-sel');
+
+      /* Map JenisTrx kode → label */
+      var JENIS_TRX_LABELS = {
+        '13':'Transfer Dana','PP':'Pulsa','PL':'PLN/Listrik','TF':'Transfer Bank',
+        'BJ':'BPJS','PD':'PDAM','TK':'Telkom','IN':'Internet',
+        'TV':'TV Kabel','FN':'Finance/Cicilan','OD':'Open Denom'
+      };
+
+      /* Produk yang memerlukan seksi Transfer Dana */
+      var TF_KODES    = ['PAYBIFAST','PAYTFDANA','PAYBIINST','PAYTF'];
+      var TF_JENIST   = ['13','TF'];
+
+      function isTfKode(kode, jenis){
+        if(!kode && !jenis) return false;
+        var k = (kode||'').toUpperCase();
+        var j = (jenis||'').toUpperCase();
+        return TF_KODES.some(function(x){ return k.indexOf(x) >= 0; })
+            || TF_JENIST.indexOf(j) >= 0
+            || TF_JENIST.indexOf((jenis||'')) >= 0;
+      }
+
+      function updateTfVisibility(){
+        var kode  = pulsaKode  ? pulsaKode.value  : '';
+        var jenis = pulsaJenistInput ? pulsaJenistInput.value : '';
+        if(pulsaSeksiTf){
+          if(isTfKode(kode, jenis)){
+            pulsaSeksiTf.style.display = '';
+            pulsaSeksiTf.style.borderLeft = '3px solid #a855f7';
+            pulsaSeksiTf.style.paddingLeft = '12px';
+          } else {
+            pulsaSeksiTf.style.display = 'none';
+          }
+        }
+      }
+
+      /* ─── Customer auto-fill ─────────────────────────────────── */
       if(pulsaCustSel){
         apiGet('customers', {}, function(data){
           fillSelect(pulsaCustSel, data,
@@ -4340,14 +4537,9 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
             return;
           }
           apiGet('customer_detail', {id: id}, function(c){
-            /* KodeCustomer ← KodePro */
             if(pulsaKodeCust) pulsaKodeCust.value = c.KodePro  || '';
-            /* Sender       ← user_h2h */
             if(pulsaSender)   pulsaSender.value   = c.user_h2h || '';
-            /* HPSender     ← phone */
             if(pulsaHpSender && c.phone) pulsaHpSender.value = c.phone;
-
-            /* Tampilkan badge konfirmasi */
             if(pulsaBadge){
               pulsaBadge.classList.remove('hidden');
               pulsaBadge.innerHTML =
@@ -4360,6 +4552,149 @@ function renderTrxCreatePage(string $activeType, string $error, string $success)
           });
         });
       }
+
+      /* ─── Produk: load semua produk dari API ──────────────────── */
+      var _allProds = [];
+
+      function fmtRp2(n){
+        n = parseFloat(n)||0;
+        if(n===0) return '—';
+        return 'Rp '+n.toLocaleString('id-ID');
+      }
+
+      function renderProdOptions(list){
+        if(!pulsaProdSel) return;
+        pulsaProdSel.innerHTML = '';
+        if(!list.length){
+          var empty = document.createElement('option');
+          empty.value = '';
+          empty.textContent = '— Tidak ada produk cocok —';
+          pulsaProdSel.appendChild(empty);
+          return;
+        }
+        list.forEach(function(p, i){
+          var opt = document.createElement('option');
+          opt.value = i; // index ke _allProds
+          var jt = p.JenisTrx ? ' [JenisTrx:'+p.JenisTrx+']' : '';
+          var harga = p.HJ_Nasabah > 0 ? fmtRp2(p.HJ_Nasabah) : (p.HJ > 0 ? fmtRp2(p.HJ) : '');
+          opt.textContent = p.Kode + (p.Nama && p.Nama !== p.Kode ? ' – '+p.Nama : '') + jt + (harga ? ' | '+harga : '');
+          opt.dataset.prod = JSON.stringify(p);
+          pulsaProdSel.appendChild(opt);
+        });
+      }
+
+      function filterProds(){
+        var q  = (pulsaProdSearch   ? pulsaProdSearch.value.toLowerCase()   : '');
+        var jt = (pulsaJenistFilter ? pulsaJenistFilter.value.toLowerCase() : '');
+        var list = _allProds.filter(function(p){
+          var match  = !q  || p.Kode.toLowerCase().includes(q) || (p.Nama||'').toLowerCase().includes(q);
+          var matchJ = !jt || (p.JenisTrx||'').toLowerCase() === jt;
+          return match && matchJ;
+        });
+        renderProdOptions(list);
+      }
+
+      if(pulsaProdSel){
+        // Load produk dari API
+        apiGet('pulsa_products', {}, function(data){
+          _allProds = data || [];
+
+          // Populate filter JenisTrx unik
+          if(pulsaJenistFilter){
+            var jts = {};
+            _allProds.forEach(function(p){ if(p.JenisTrx) jts[p.JenisTrx] = true; });
+            Object.keys(jts).sort().forEach(function(jt){
+              var o = document.createElement('option');
+              o.value = jt;
+              o.textContent = jt + (JENIS_TRX_LABELS[jt] ? ' – '+JENIS_TRX_LABELS[jt] : '');
+              pulsaJenistFilter.appendChild(o);
+            });
+          }
+
+          // Populate supplier dropdown
+          if(pulsaSupplierSel){
+            apiGet('suppliers', {}, function(supData){
+              if(!supData || !supData.length) return;
+              pulsaSupplierSel.innerHTML = '';
+              supData.forEach(function(s){
+                var o = document.createElement('option');
+                o.value = s.Kode;
+                o.textContent = s.Kode + ' – ' + s.Nama;
+                if(s.Kode === '0024') o.selected = true;
+                pulsaSupplierSel.appendChild(o);
+              });
+            });
+          }
+
+          renderProdOptions(_allProds.slice(0, 100)); // tampil 100 pertama
+        });
+
+        // Search filter
+        if(pulsaProdSearch){
+          pulsaProdSearch.addEventListener('input', filterProds);
+        }
+        if(pulsaJenistFilter){
+          pulsaJenistFilter.addEventListener('change', filterProds);
+        }
+
+        // On produk select → auto-fill semua field terkait
+        pulsaProdSel.addEventListener('change', function(){
+          var opt = this.options[this.selectedIndex];
+          if(!opt || opt.value === '') return;
+          var p;
+          try { p = JSON.parse(opt.dataset.prod || '{}'); } catch(e){ return; }
+
+          /* Kode */
+          if(pulsaKode){ pulsaKode.value = p.Kode || ''; }
+          if(pulsaKodeHint && p.Nama && p.Nama !== p.Kode){
+            pulsaKodeHint.textContent = '📦 ' + p.Nama;
+            pulsaKodeHint.classList.remove('hidden');
+          } else if(pulsaKodeHint){
+            pulsaKodeHint.classList.add('hidden');
+          }
+
+          /* JenisTrx */
+          if(pulsaJenistInput && p.JenisTrx){
+            pulsaJenistInput.value = p.JenisTrx;
+          }
+
+          /* Harga – hanya isi jika kosong atau user belum ketik */
+          if(pulsaHjNasabah && (!pulsaHjNasabah.value || pulsaHjNasabah.value === '0')){
+            var hj = p.HJ_Nasabah > 0 ? p.HJ_Nasabah : (p.HJ > 0 ? p.HJ : 0);
+            if(hj > 0) pulsaHjNasabah.value = hj;
+          }
+          if(pulsaHj && (!pulsaHj.value || pulsaHj.value === '0') && p.HJ > 0){
+            pulsaHj.value = p.HJ;
+          }
+          if(pulsaHb && (!pulsaHb.value || pulsaHb.value === '0') && p.HB > 0){
+            pulsaHb.value = p.HB;
+          }
+
+          /* Show/hide Transfer Dana section */
+          updateTfVisibility();
+
+          /* Badge produk */
+          if(pulsaProdBadge){
+            pulsaProdBadge.classList.remove('hidden');
+            pulsaProdBadge.innerHTML =
+              '<div><span class="font-semibold text-purple-700 dark:text-purple-300">Kode</span><br><code class="text-sm">'+(p.Kode||'—')+'</code></div>'
+              +'<div><span class="font-semibold text-purple-700 dark:text-purple-300">JenisTrx</span><br><code class="text-sm">'+(p.JenisTrx||'—')+'</code> '+(JENIS_TRX_LABELS[p.JenisTrx]||'')+'</div>'
+              +'<div><span class="font-semibold text-purple-700 dark:text-purple-300">HJ Nasabah</span><br><code class="text-sm">'+fmtRp2(p.HJ_Nasabah||p.HJ)+'</code></div>'
+              +'<div><span class="font-semibold text-purple-700 dark:text-purple-300">HB Beli</span><br><code class="text-sm">'+fmtRp2(p.HB)+'</code>'+(p.src==='history'?'<br><span class="text-[10px] text-slate-400">dari history</span>':p.cnt?' ('+p.cnt+'x)':'')+'</div>';
+          }
+        });
+      }
+
+      /* manual edit kode / jenist → update TF visibility */
+      if(pulsaKode){
+        pulsaKode.addEventListener('input', updateTfVisibility);
+      }
+      if(pulsaJenistInput){
+        pulsaJenistInput.addEventListener('change', updateTfVisibility);
+      }
+
+      /* Inisialisasi visibility Transfer Dana */
+      updateTfVisibility();
 
     })();
     </script>
